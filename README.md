@@ -104,7 +104,8 @@ ADMIN_TOKEN=xxx DB_FILE=/var/lib/appcenter/catalog.db PACKAGE_ROOT=/srv/packages
 `npm run build:real-catalog`（发现 → 替换演示目录 → 镜像到 `local-repo/`）。
 
 未完成（需要真实环境或额外决策）：
-- 打包为可双击安装的桌面产物（Tauri 配置已就位，构建需本机工具链）
+- 打包为可双击安装的桌面产物：`packages/app/src-tauri/` 的 Tauri v2 骨架已入库，
+  但**尚未在本仓库编译验证**，构建需要 Rust + MSVC + WebView2 工具链（`npm run icons` 后 `npm run tauri build`）
 - MSIX / 归档安装的实机端到端验证
 - 真实升级链路与真实安装包的端到端演练
 - 开机自启与托盘图标在真实桌面会话下的验收

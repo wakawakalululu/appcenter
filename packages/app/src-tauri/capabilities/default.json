@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "仅允许访问本地引擎桥与打开其回环地址",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-webview-window-create",
+    "core:event:default"
+  ]
+}
