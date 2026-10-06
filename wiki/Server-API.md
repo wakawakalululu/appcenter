@@ -40,6 +40,7 @@ curl -X POST http://127.0.0.1:7991/api/login \
 | GET | /api/bundles | 捆绑包（装机套装） |
 | GET | /api/self-update | 已发布的客户端新版本清单 |
 | POST | /api/apps/:id/receipt | 客户端上报安装回执 |
+| POST | /api/heartbeat | 客户端上报本机资产心跳（按 machineId 幂等） |
 
 ## 审批与通知
 
@@ -63,6 +64,29 @@ curl -X POST http://127.0.0.1:7991/api/login \
 | POST | /api/admin/categories | 分类维护 |
 | POST | /api/admin/self-update | 发布客户端新版本 |
 | POST | /api/admin/banners、/api/admin/bundles | 运营位与捆绑包 |
+| GET | /api/admin/fleet | 机群资产汇总（逐机最近心跳 + 全局计数） |
+
+## 机群资产心跳
+
+客户端周期性把「本机目录应用的安装态摘要」上报到 `POST /api/heartbeat`，管理端用
+`GET /api/admin/fleet` 汇总查看覆盖率与到达率。
+
+```bash
+curl -X POST http://127.0.0.1:7991/api/heartbeat \
+  -H "content-type: application/json" \
+  -d '{"machineId":"pc-01","appVersion":"1.0.0",
+       "installed":[{"appId":"wps-office","version":"12.1.0","upgradable":false}],
+       "needsApproval":["vpn-client"],
+       "counts":{"installed":1,"upgradable":0,"needsApproval":1,"pendingApprovals":0}}'
+```
+
+服务端按 `machineId` 幂等 upsert，只保留每台机器最近一次摘要，并记录首次 / 最近上报时间。
+`fleet` 返回 `{ agents: [...], totals: { agents, installed, upgradable, needsApproval } }`。
+
+**范围边界**：心跳只回答「分发下去的软件在这台机器上是什么状态」，上报面严格收敛在
+目录内应用的身份与版本（appId + version）与计数量；不采集进程列表、窗口、浏览记录、
+屏幕或任何终端行为数据。`buildAssetSummary` 是纯函数，其输出字段集合就是客户端愿意
+告诉服务端的全部信息，并有单元测试锁定该边界。
 
 ## 安装包下载
 

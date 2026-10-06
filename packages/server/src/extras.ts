@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { DatabaseSync } from "node:sqlite";
+import type { AssetApp, FleetAgent } from "@appcenter/core";
 
 /**
  * 应用中心的服务端补充能力，对应服务端架构设计 §5/§6：
@@ -11,6 +12,8 @@ const TABLES: string[] = [
   "CREATE TABLE IF NOT EXISTS banners (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', image_url TEXT NOT NULL DEFAULT '', link TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0, starts_at TEXT, ends_at TEXT, active INTEGER NOT NULL DEFAULT 1)",
   // 捆绑包（装机套装）：一组应用按顺序整体下发。
   "CREATE TABLE IF NOT EXISTS bundles (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', app_ids TEXT NOT NULL DEFAULT '[]', sort_order INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)",
+  // 机群资产心跳：每台机器一行，只存目录内应用安装态摘要与计数（无终端行为数据）。
+  "CREATE TABLE IF NOT EXISTS heartbeats (machine_id TEXT PRIMARY KEY, app_version TEXT NOT NULL DEFAULT '', installed_count INTEGER NOT NULL DEFAULT 0, upgradable_count INTEGER NOT NULL DEFAULT 0, needs_approval_count INTEGER NOT NULL DEFAULT 0, pending_approvals INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL DEFAULT '{}', first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL)",
 ];
 
 export interface Bundle {
@@ -140,6 +143,53 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
     send(res, Number(result.changes ?? 0) > 0 ? 200 : 404, { ok: Number(result.changes ?? 0) > 0 });
     return true;
   }
+
+  // 机群资产心跳：客户端周期性上报，服务端按 machineId 幂等 upsert，只保留最近一次。
+  if (segments[0] === "api" && segments[1] === "heartbeat" && segments.length === 2 && method === "POST") {
+    const input = await body(req);
+    const machineId = String(input.machineId ?? "");
+    if (!machineId) return send(res, 400, { error: "machineId required" }), true;
+    const installed = Array.isArray(input.installed) ? (input.installed as AssetApp[]) : [];
+    const needsApproval = Array.isArray(input.needsApproval) ? input.needsApproval.map(String) : [];
+    const counts = (input.counts ?? {}) as Record<string, unknown>;
+    const upgradable = installed.filter((app) => app?.upgradable === true).length;
+    const now = new Date().toISOString();
+    const existing = ctx.db.prepare("SELECT first_seen_at FROM heartbeats WHERE machine_id = ?").get(machineId) as Record<string, unknown> | undefined;
+    const firstSeen = existing ? String(existing.first_seen_at) : now;
+    ctx.db
+      .prepare(
+        "INSERT INTO heartbeats (machine_id, app_version, installed_count, upgradable_count, needs_approval_count, pending_approvals, payload, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET app_version=excluded.app_version, installed_count=excluded.installed_count, upgradable_count=excluded.upgradable_count, needs_approval_count=excluded.needs_approval_count, pending_approvals=excluded.pending_approvals, payload=excluded.payload, last_seen_at=excluded.last_seen_at",
+      )
+      .run(
+        machineId,
+        String(input.appVersion ?? ""),
+        Number(counts.installed ?? installed.length),
+        Number(counts.upgradable ?? upgradable),
+        Number(counts.needsApproval ?? needsApproval.length),
+        Number(counts.pendingApprovals ?? 0),
+        JSON.stringify({ installed, needsApproval }),
+        firstSeen,
+        now,
+      );
+    send(res, 201, { ok: true, firstSeenAt: firstSeen, lastSeenAt: now });
+    return true;
+  }
+  if (segments[0] === "api" && segments[1] === "admin" && segments[2] === "fleet" && method === "GET") {
+    if (!ctx.requireAdmin(req)) return send(res, 403, { error: "admin token required" }), true;
+    const rows = ctx.db.prepare("SELECT * FROM heartbeats ORDER BY last_seen_at DESC, machine_id").all() as Record<string, unknown>[];
+    const agents = rows.map(toFleetAgent);
+    const totals = agents.reduce(
+      (acc, a) => ({
+        agents: acc.agents + 1,
+        installed: acc.installed + a.counts.installed,
+        upgradable: acc.upgradable + a.counts.upgradable,
+        needsApproval: acc.needsApproval + a.counts.needsApproval,
+      }),
+      { agents: 0, installed: 0, upgradable: 0, needsApproval: 0 },
+    );
+    send(res, 200, { agents, totals });
+    return true;
+  }
   return false;
 }
 
@@ -172,5 +222,33 @@ function toBanner(row: Record<string, unknown>): Banner {
     startsAt: row.starts_at ? String(row.starts_at) : null,
     endsAt: row.ends_at ? String(row.ends_at) : null,
     active: Number(row.active) === 1,
+  };
+}
+
+function toFleetAgent(row: Record<string, unknown>): FleetAgent {
+  let installed: AssetApp[] = [];
+  let needsApproval: string[] = [];
+  try {
+    const payload = JSON.parse(String(row.payload ?? "{}")) as Record<string, unknown>;
+    if (Array.isArray(payload.installed)) installed = payload.installed as AssetApp[];
+    if (Array.isArray(payload.needsApproval)) needsApproval = payload.needsApproval.map(String);
+  } catch {
+    installed = [];
+    needsApproval = [];
+  }
+  return {
+    machineId: String(row.machine_id),
+    appVersion: String(row.app_version),
+    reportedAt: String(row.last_seen_at),
+    installed,
+    needsApproval,
+    counts: {
+      installed: Number(row.installed_count),
+      upgradable: Number(row.upgradable_count),
+      needsApproval: Number(row.needs_approval_count),
+      pendingApprovals: Number(row.pending_approvals),
+    },
+    firstSeenAt: String(row.first_seen_at),
+    lastSeenAt: String(row.last_seen_at),
   };
 }

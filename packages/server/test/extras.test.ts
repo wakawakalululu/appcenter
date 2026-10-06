@@ -197,3 +197,37 @@ test("scheduled checks run on demand, report state and stop cleanly", async () =
   assert.equal(stopped.running, false);
   assert.ok(stopped.lastCheckAt, "停掉调度器不该丢掉上次检查时间");
 });
+
+test("asset heartbeat upserts per machine and aggregates into the admin fleet view", async () => {
+  const facadeA = await facadeFor("fleet-pc-01");
+  // 同一台机器连报两次：按 machineId 幂等，机群里仍只有一行。
+  const first = await facadeA.reportHeartbeat();
+  assert.equal(first.machineId, "fleet-pc-01");
+  assert.ok(first.reportedAt);
+  await facadeA.reportHeartbeat();
+
+  const facadeB = await facadeFor("fleet-pc-02");
+  await facadeB.reportHeartbeat();
+
+  const denied = await fetch(base + "/api/admin/fleet");
+  assert.equal(denied.status, 403, "机群汇总必须管理员鉴权");
+
+  const ok = await fetch(base + "/api/admin/fleet", { headers: { authorization: "Bearer " + adminToken } });
+  assert.equal(ok.status, 200);
+  const report = (await ok.json()) as { agents: { machineId: string; lastSeenAt: string; firstSeenAt: string }[]; totals: { agents: number } };
+  const ids = report.agents.map((a) => a.machineId);
+  assert.ok(ids.includes("fleet-pc-01") && ids.includes("fleet-pc-02"), "两台机器都应在册");
+  assert.equal(ids.filter((id) => id === "fleet-pc-01").length, 1, "重复心跳不应产生第二行");
+  assert.ok(report.totals.agents >= 2);
+  const pc1 = report.agents.find((a) => a.machineId === "fleet-pc-01");
+  assert.ok(pc1 && pc1.firstSeenAt <= pc1.lastSeenAt, "首次上报时间不晚于最近上报");
+});
+
+test("heartbeat endpoint rejects a payload without a machine id", async () => {
+  const res = await fetch(base + "/api/heartbeat", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ appVersion: "1.0.0", installed: [], needsApproval: [], counts: {} }),
+  });
+  assert.equal(res.status, 400);
+});

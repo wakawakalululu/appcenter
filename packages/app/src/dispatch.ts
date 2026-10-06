@@ -91,6 +91,10 @@ export async function dispatch(facade: AppCenterFacade, method: string, params: 
         return { ok: true, result: await facade.pollNotifications() };
       case "notification.done":
         return { ok: true, result: await facade.markNotificationDone(str("id")) };
+      case "heartbeat.report":
+        return { ok: true, result: await facade.reportHeartbeat() };
+      case "fleet.summary":
+        return { ok: true, result: await facade.fleet() };
       case "bundle.list":
         return { ok: true, result: await facade.bundles() };
       case "bundle.install":

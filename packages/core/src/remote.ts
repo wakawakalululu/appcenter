@@ -1,6 +1,7 @@
 import type { AppDetail, AppSummary, Category, RatingInput, RatingDistribution } from "./catalog/types.ts";
 import type { Grant } from "./approval/workflow.ts";
 import type { SelfUpdateManifest } from "./selfupdate/selfupdate.ts";
+import type { AssetSummary, FleetReport } from "./inventory/heartbeat.ts";
 
 export interface ApprovalTicket {
   requestId: string;
@@ -104,6 +105,16 @@ export class RemoteCatalog {
 
   markNotificationDone(id: string): Promise<{ ok: boolean }> {
     return this.request("/api/notifications/" + encodeURIComponent(id) + "/done", { method: "POST" });
+  }
+
+  /** 机群资产心跳：只上报目录内应用的安装态摘要，不含任何终端行为数据。 */
+  reportHeartbeat(summary: AssetSummary): Promise<{ ok: boolean }> {
+    return this.request("/api/heartbeat", { method: "POST", body: JSON.stringify(summary) });
+  }
+
+  /** 管理端：全部机器最近一次心跳与全局计数。 */
+  fleet(): Promise<FleetReport> {
+    return this.request("/api/admin/fleet");
   }
 }
 

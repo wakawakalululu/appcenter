@@ -24,6 +24,7 @@ export * from "./leftover/backup.ts";
 export * from "./leftover/lnk.ts";
 export * from "./catalog/view.ts";
 export * from "./inventory/icons.ts";
+export * from "./inventory/heartbeat.ts";
 export * from "./runtime/config.ts";
 export * from "./leftover/contextmenu.ts";
 export * from "./localrepo/repo.ts";

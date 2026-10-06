@@ -22,6 +22,7 @@ import {
 import { ChildProcessRunner, type ProcessRunner } from "./runner/executor.ts";
 import { RuntimeConfigStore, type RuntimeConfig, type RuntimeConfigIssue } from "./runtime/config.ts";
 import { IconCache, iconSourceOf } from "./inventory/icons.ts";
+import { buildAssetSummary, type AssetSummary, type FleetReport } from "./inventory/heartbeat.ts";
 import {
   buildCatalogEntries,
   categorySections,
@@ -165,6 +166,7 @@ export interface ScheduleState {
   running: boolean;
   lastCheckAt: string | null;
   lastCheckError: string | null;
+  lastHeartbeatAt: string | null;
   unreadNotifications: number;
 }
 
@@ -231,6 +233,7 @@ export class AppCenterFacade {
   private pendingApprovals = 0;
   private lastCheckAt: string | null = null;
   private lastCheckError: string | null = null;
+  private lastHeartbeatAt: string | null = null;
   private unreadNotifications = 0;
   private readonly bundleRunLog: BundleRun[] = [];
 
@@ -744,6 +747,7 @@ export class AppCenterFacade {
       running: this.timer !== null,
       lastCheckAt: this.lastCheckAt,
       lastCheckError: this.lastCheckError,
+      lastHeartbeatAt: this.lastHeartbeatAt,
       unreadNotifications: this.unreadNotifications,
     };
   }
@@ -754,10 +758,34 @@ export class AppCenterFacade {
       if (this.catalogCache.length === 0) await this.refreshCatalog();
       await this.upgrades();
       await this.pollNotifications();
+      // 心跳失败不应污染检查状态：它是旁路上报，独立吞掉错误。
+      await this.reportHeartbeat().catch(() => undefined);
       this.lastCheckError = null;
     } catch (err) {
       this.lastCheckError = err instanceof Error ? err.message : String(err);
     }
+  }
+
+  /**
+   * 机群资产心跳：把本机目录应用的安装态摘要上报服务端，供管理端统计。
+   * 只回答「分发下去的软件装成什么样」，不采集任何终端行为数据。
+   */
+  async reportHeartbeat(): Promise<AssetSummary> {
+    const entries = await this.catalogView();
+    const summary = buildAssetSummary({
+      machineId: this.config.userId,
+      appVersion: this.config.appVersion,
+      entries,
+      pendingApprovals: this.pendingApprovals,
+    });
+    await this.remote.reportHeartbeat(summary);
+    this.lastHeartbeatAt = summary.reportedAt;
+    return summary;
+  }
+
+  /** 管理端：全部机器最近一次心跳与全局计数（需管理员令牌）。 */
+  fleet(): Promise<FleetReport> {
+    return this.remote.fleet();
   }
 
   /** 分发回执：装上/没装上都要告诉服务端，管理端才看得见真实到达率。 */
