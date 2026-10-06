@@ -1,6 +1,12 @@
 # AppCenter
 
+[![CI](https://github.com/wakawakalululu/appcenter/actions/workflows/ci.yml/badge.svg)](https://github.com/wakawakalululu/appcenter/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/wakawakalululu/appcenter)](https://github.com/wakawakalululu/appcenter/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 企业「应用中心 / 软件商店」客户端引擎 + 目录服务端。TypeScript 实现，零构建步骤（Node 直接跑 TS）。
+
+![应用中心首页](docs/assets/screenshots/home.png)
 
 覆盖软件分发全链路：目录与分类检索、本机已装清单、卸载残留扫描与清理、断点续传下载与校验、
 多类型安装执行计划、批量安装与升级、申请审批、皮肤与主题、客户端自升级、系统托盘与多窗口。

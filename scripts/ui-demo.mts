@@ -3,7 +3,7 @@ import path from "node:path";
 import { CatalogDb, createApi, seedDemo } from "../packages/server/src/server.ts";
 import { startUi } from "../packages/app/src/bridge.ts";
 
-const db = CatalogDb.open(path.join(process.cwd(), "smoke-catalog.db"));
+const db = CatalogDb.open(process.env.DB_FILE ?? path.join(process.cwd(), "smoke-catalog.db"));
 seedDemo(db);
 // 演示运营位：目录数据归 seedDemo，banner 属于演示配置，单独灌在这里。
 db.upsertBanner({ id: "banner-office", title: "一键装机 常用软件极速到位", subtitle: "精选办公套件，一次配置全端就绪", link: "app:wps-office", sortOrder: 1 });
