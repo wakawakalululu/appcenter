@@ -117,12 +117,39 @@ const nodeProbe: FileSystemProbe = {
   },
   async readText(target: string): Promise<string | null> {
     try {
-      return await fs.readFile(target, "utf8");
+      const buf = await fs.readFile(target);
+      return decodeTextWithBom(buf);
     } catch {
       return null;
     }
   },
 };
+
+/**
+ * 按 BOM 识别文本编码并解码，供残留扫描读取计划任务定义等文件。
+ * 真机取证：`System32\Tasks` 里 221 个任务文件全部是 UTF-16LE（BOM `FF FE`），
+ * 之前固定按 UTF-8 读会让 `"<Task"` 匹配命中 0 个，整类「计划任务残留」在真机上形同虚设。
+ */
+export function decodeTextWithBom(buf: Buffer): string {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+    return buf.subarray(2).toString("utf16le");
+  }
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    const body = buf.subarray(2);
+    const swapped = Buffer.from(body);
+    for (let i = 0; i + 1 < swapped.length; i += 2) {
+      const a = swapped[i] as number;
+      const b = swapped[i + 1] as number;
+      swapped[i] = b;
+      swapped[i + 1] = a;
+    }
+    return swapped.toString("utf16le");
+  }
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    return buf.subarray(3).toString("utf8");
+  }
+  return buf.toString("utf8");
+}
 
 export function defaultScanEnv(): ScanEnv {
   const home = os.homedir();

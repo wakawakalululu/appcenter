@@ -15,6 +15,7 @@
     "verify:inventory": "node --experimental-transform-types scripts/verify-inventory-refresh.mts",
     "measure:contextmenu": "node --experimental-transform-types scripts/measure-residue-contextmenu.mts",
     "measure:readback": "node --experimental-transform-types scripts/measure-install-readback.mts",
+    "measure:tasks": "node --experimental-transform-types scripts/measure-residue-tasks.mts",
     "discover": "node --experimental-transform-types scripts/discover-packages.mts",
     "build:real-catalog": "node --experimental-transform-types scripts/build-real-catalog.mts",
     "icons": "node packages/app/scripts/gen-icons.mjs --tauri packages/app/src-tauri/icons",
