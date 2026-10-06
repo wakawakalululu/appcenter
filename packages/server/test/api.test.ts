@@ -51,10 +51,19 @@ async function api<T>(pathname: string, init?: RequestInit): Promise<{ status: n
   return { status: response.status, body };
 }
 
+/** 轮询等待条件成立；并发跑测试时比固定 sleep 可靠得多。 */
+async function waitFor(predicate: () => boolean, limitMs = 3000): Promise<void> {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > limitMs) throw new Error("waitFor timed out after " + String(limitMs) + "ms");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 test("catalog lists apps, categories and app detail", async () => {
   const apps = await api<{ id: string }[]>("/api/apps");
   assert.equal(apps.status, 200);
-  assert.equal(apps.body.length, 10);
+  assert.equal(apps.body.length, 21, "seedDemo 含 11 个补足分类密度的 extraApps");
   const categories = await api<{ id: string }[]>("/api/categories");
   assert.equal(categories.body.length, 10);
   const detail = await api<{ versions: unknown[]; installMode?: string }>("/api/apps/enterprise-im");
@@ -226,12 +235,13 @@ test("facade drives search, upgrade planning and an approval-gated install end t
     new FakeHost(),
   );
 
-  assert.equal(await facade.refreshCatalog(), 11);
+  assert.equal(await facade.refreshCatalog(), 22); // seedDemo 21 + 本测试自灌的 local-demo
   const hits = await facade.search({ text: "bendi" });
   assert.ok(hits.length > 0);
 
   const blocked = await facade.install("local-demo");
-  await new Promise((r) => setTimeout(r, 80));
+  // 并发跑测试时 CPU/IO 可能被挤满，固定 sleep 会偶发超时；改成轮询等终态。
+  await waitFor(() => facade.jobs().find((j) => j.id === blocked.id)?.state === "awaiting_approval");
   assert.equal(facade.jobs().find((j) => j.id === blocked.id)?.state, "awaiting_approval");
   assert.equal(calls.length, 0);
   assert.equal(facade.trayView().status, "awaiting-approval");
@@ -248,7 +258,7 @@ test("facade drives search, upgrade planning and an approval-gated install end t
   await facade.attachGrant(ticket.body.requestId);
 
   const retry = await facade.install("local-demo");
-  await new Promise((r) => setTimeout(r, 200));
+  await waitFor(() => facade.jobs().find((j) => j.id === retry.id)?.state === "succeeded");
   assert.equal(facade.jobs().find((j) => j.id === retry.id)?.state, "succeeded");
   assert.equal(calls[0]?.program, "msiexec.exe");
   const landed = facade.jobs().find((j) => j.id === retry.id)?.packagePath ?? "";

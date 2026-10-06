@@ -130,7 +130,9 @@ async function walkFiles(fs: FileSystemProbe, dir: string, extension: string, li
     if (!current) continue;
     visited += 1;
     for (const entry of await fs.readDir(current)) {
-      if (entry.toUpperCase().endsWith(extension)) found.push(entry);
+      // 大小写不敏感比较：此前用大写条目名去 endsWith 小写扩展名，永远匹配不上，
+      // 导致 menu/shortcut 残留从未被检出。
+      if (entry.toLowerCase().endsWith(extension.toLowerCase())) found.push(entry);
       else stack.push(entry);
     }
   }
@@ -144,9 +146,15 @@ async function collectTaskDefinitions(fs: FileSystemProbe, root: string, limit =
   while (stack.length && out.length < limit && probed < 5000) {
     const dir = stack.pop();
     if (!dir) continue;
-    for (const entry of await fs.readDir(dir)) {
+    const entries = await fs.readDir(dir);
+    // 同一目录内的读取先全部发起再按原顺序消费：并行拿回结果，同时保持
+    // DFS 顺序、probed 计数时机与 limit/probed 的截断点逐字节一致。
+    const pending = entries.map((entry) => fs.readText(entry));
+    for (let index = 0; index < entries.length; index++) {
       probed += 1;
-      const xml = await fs.readText(entry);
+      const xml = await pending[index];
+      const entry = entries[index];
+      if (!entry) continue;
       if (xml && xml.includes("<Task")) {
         out.push({ file: entry, xml });
         continue;
@@ -278,30 +286,35 @@ export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<Re
     }
   });
 
-  const menuAndShortcuts = async (kind: ResidueKind): Promise<void> => {
-    for (const root of [deps.env.commonStartMenu, deps.env.userStartMenu]) {
-      const links = await walkFiles(deps.fs, root, ".lnk", 1500);
-      for (const file of links) {
-        const link = await readShellLink(file);
-        const target = link?.target ?? "";
-        const icon = link?.icon ?? "";
-        const hit =
-          (target && (references(anchors, target) || (exeName !== "" && basename(target) === exeName))) ||
-          (icon && references(anchors, icon));
-        if (!hit) continue;
-        items.push({
-          kind,
-          risk: RISK[kind],
-          path: file,
-          detail: (kind === "menu" ? "开始菜单项" : "快捷方式") + "指向已卸载程序 " + (target || icon),
-          reason: kind === "menu" ? "orphan-start-menu-entry" : "leftover-shortcut",
-        });
-      }
+  // menu 与 shortcut 两段逻辑相同，只差 kind：共享同一棵开始菜单树的
+  // 遍历与 .lnk 解析结果，避免同一目录被走两遍；items 顺序与原先逐段重走完全一致。
+  const scannedLinks: { file: string; link: Awaited<ReturnType<typeof readShellLink>> }[] = [];
+  for (const root of [deps.env.commonStartMenu, deps.env.userStartMenu]) {
+    for (const file of await walkFiles(deps.fs, root, ".lnk", 1500)) {
+      scannedLinks.push({ file, link: await readShellLink(file) });
+    }
+  }
+
+  const menuAndShortcuts = (kind: ResidueKind): void => {
+    for (const { file, link } of scannedLinks) {
+      const target = link?.target ?? "";
+      const icon = link?.icon ?? "";
+      const hit =
+        (target && (references(anchors, target) || (exeName !== "" && basename(target) === exeName))) ||
+        (icon && references(anchors, icon));
+      if (!hit) continue;
+      items.push({
+        kind,
+        risk: RISK[kind],
+        path: file,
+        detail: (kind === "menu" ? "开始菜单项" : "快捷方式") + "指向已卸载程序 " + (target || icon),
+        reason: kind === "menu" ? "orphan-start-menu-entry" : "leftover-shortcut",
+      });
     }
   };
 
-  await timed("menu", () => menuAndShortcuts("menu"));
-  await timed("shortcut", () => menuAndShortcuts("shortcut"));
+  await timed("menu", async () => menuAndShortcuts("menu"));
+  await timed("shortcut", async () => menuAndShortcuts("shortcut"));
 
   await timed("directory", async () => {
     const dirs = [app.installLocation, deps.env.programData + SEP + app.regDir, deps.env.temp + SEP + app.regDir].filter(

@@ -43,6 +43,15 @@ after(async () => {
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
 
+/** 轮询等待条件成立；并发跑测试时比固定 sleep 可靠得多。 */
+async function waitFor(predicate: () => boolean, limitMs = 3000): Promise<void> {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > limitMs) throw new Error("waitFor timed out after " + String(limitMs) + "ms");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 async function postJson<T>(pathname: string, payload: unknown, admin = true): Promise<{ status: number; body: T }> {
   const response = await fetch(base + pathname, {
     method: "POST",
@@ -168,14 +177,15 @@ test("installBundle skips what is current, queues the rest and never blocks on a
   const calls: ExecutionRequest[] = [];
   const facade = await facadeWithRunner(installedPath, calls);
 
-  assert.equal(await facade.refreshCatalog(), 13);
+  assert.equal(await facade.refreshCatalog(), 24); // seedDemo 21 + 套装测试自灌 3 个 kit 应用
   const run = await facade.installBundle("full-kit");
   // 已装到最新版的跳过，目录里没有的记下来，剩下两个入队。
   assert.deepEqual(run.skipped, ["kit-installed"]);
   assert.deepEqual(run.unknown, ["kit-gone"]);
   assert.equal(run.jobIds.length, 2);
 
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  // 并发跑测试时固定 sleep 会偶发超时，改为轮询到整包收敛再断言。
+  await waitFor(() => facade.bundleProgress(run.id)?.percent === 100);
   const progress = facade.bundleProgress(run.id);
   assert.ok(progress, "进度要能按 runId 查到");
   assert.equal(progress.total, 2);
