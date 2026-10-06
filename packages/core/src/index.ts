@@ -5,6 +5,7 @@ export * from "./util/semver.ts";
 export * from "./inventory/registry.ts";
 export * from "./inventory/inventory.ts";
 export * from "./inventory/cache.ts";
+export * from "./runtime/autostart.ts";
 export * from "./leftover/scan.ts";
 export * from "./leftover/cleanup.ts";
 export * from "./download/downloader.ts";

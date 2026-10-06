@@ -27,7 +27,19 @@ function clsidKey(guid: string): string {
   return ["HKCR", "CLSID", "{" + guid.toUpperCase() + "}"].join(SEP);
 }
 
-async function moduleOfClsid(reg: RegClient, guid: string): Promise<{ server: string | null; description: string }> {
+interface ClsidInfo {
+  server: string | null;
+  description: string;
+}
+
+/**
+ * 解析 CLSID 对应的服务器 DLL 与描述。
+ * 同一个 shell 扩展常同时挂在多个挂载点（* / Directory / Folder / ...）下，
+ * 用缓存把「每个挂载点各查一次」收敛成「每个 CLSID 只查一次」。
+ */
+async function moduleOfClsid(reg: RegClient, guid: string, cache: Map<string, ClsidInfo>): Promise<ClsidInfo> {
+  const cached = cache.get(guid);
+  if (cached) return cached;
   const key = clsidKey(guid);
   const keys = await reg.queryTree(key);
   const self = keys.find((k) => k.path.replace(/\\+$/, "").toLowerCase() === key.toLowerCase());
@@ -36,7 +48,9 @@ async function moduleOfClsid(reg: RegClient, guid: string): Promise<{ server: st
     keys
       .find((k) => k.path.toLowerCase().endsWith("inprocserver32"))
       ?.values.find((v) => v.name === "(Default)" || v.name === "@")?.data ?? null;
-  return { server, description };
+  const info: ClsidInfo = { server, description };
+  cache.set(guid, info);
+  return info;
 }
 
 /**
@@ -50,14 +64,17 @@ export async function scanContextMenu(
 ): Promise<ResidueItem[]> {
   const items: ResidueItem[] = [];
   const seen = new Set<string>();
-  for (const root of CONTEXTMENU_ROOTS) {
-    const keys: RegistryKey[] = await reg.queryTree(root);
+  const clsidCache = new Map<string, ClsidInfo>();
+  // 五个挂载点并行取数，再按 CONTEXTMENU_ROOTS 原顺序处理，保证结果与顺序不变。
+  const dumps = await Promise.all(CONTEXTMENU_ROOTS.map((root) => reg.queryTree(root)));
+  for (const [index, root] of CONTEXTMENU_ROOTS.entries()) {
+    const keys: RegistryKey[] = dumps[index] ?? [];
     for (const key of keys) {
       if (key.path.replace(/\\+$/, "").toLowerCase() === root.toLowerCase()) continue;
       for (const value of key.values) {
         const guid = extractGuid(value.data) ?? (normalizeGuid(value.data).length === 36 ? normalizeGuid(value.data) : null);
         if (!guid || seen.has(root.toLowerCase() + "|" + value.name.toLowerCase())) continue;
-        const { server, description } = await moduleOfClsid(reg, guid);
+        const { server, description } = await moduleOfClsid(reg, guid, clsidCache);
         const evidence = [server ?? "", description, value.data].filter(Boolean);
         if (!evidence.some((entry) => matches(entry))) continue;
         seen.add(root.toLowerCase() + "|" + value.name.toLowerCase());

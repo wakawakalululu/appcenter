@@ -192,3 +192,56 @@ test("context menu handlers still pointing at the app are reported as value-leve
 function installDirOf(name: string): string {
   return ["C:", "Program Files", name].join(BS);
 }
+
+/** 包裹一层计数，用来证明「同一 CLSID 只解析一次」。 */
+class CountingRegClient {
+  readonly queried: string[] = [];
+  constructor(private readonly inner: import("@appcenter/core").RegClient) {}
+  async queryTree(rootPath: string): Promise<import("@appcenter/core").RegistryKey[]> {
+    this.queried.push(rootPath);
+    return this.inner.queryTree(rootPath);
+  }
+  async queryChildren(rootPath: string): Promise<string[]> {
+    this.queried.push(rootPath);
+    return this.inner.queryChildren(rootPath);
+  }
+  async readKey(p: string): Promise<import("@appcenter/core").RegistryKey | null> {
+    this.queried.push(p);
+    return this.inner.readKey(p);
+  }
+}
+
+test("the same CLSID mounted on several handlers is resolved only once", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "ctx-memo-"));
+  const clsid = "{6B2C1D4E-AAAA-BBBB-CCCC-DDDDEEEEFFFF}";
+  const clsidPath = ["HKCR", "CLSID", clsid].join(BS);
+  const mounted = ["*", "Directory", "Folder"];
+  const reg = new InMemoryRegClient([
+    ...mounted.map((entry) =>
+      regKey(["HKCR", entry, "shellex", "ContextMenuHandlers", "DemoShell"].join(BS), { "(Default)": clsid }),
+    ),
+    regKey(clsidPath, { "(Default)": "Demo Shell Extension" }),
+    regKey(clsidPath + BS + "InprocServer32", { "(Default)": installDirOf("DemoShell") + BS + "shell.dll" }),
+  ]);
+  const app = (await scanInstalledApps(new InMemoryRegClient([
+    regKey((UNINSTALL_ROOTS[0]?.path ?? "") + BS + "DemoShell", {
+      DisplayName: "Demo Shell",
+      DisplayVersion: "1.0.0",
+      InstallLocation: installDirOf("DemoShell"),
+      UninstallString: installDirOf("DemoShell") + BS + "unins000.exe",
+    }),
+  ])))![0]!;
+
+  const counting = new CountingRegClient(reg);
+  const report = await scanResidue(app, {
+    reg: counting,
+    fs: { exists: async () => false, readDir: async () => [], readText: async () => null },
+    env: { programData: dir, appData: dir, commonStartMenu: dir, userStartMenu: dir, temp: dir, systemRoot: dir },
+  });
+
+  // 结果不变：三个挂载点各报一条。
+  assert.equal(report.counts.contextmenu, mounted.length, "三个挂载点都应被报出");
+  // 收益：CLSID 只解析一次，而不是每个挂载点一次。
+  const clsidQueries = counting.queried.filter((p) => p.toLowerCase().startsWith(clsidPath.toLowerCase()));
+  assert.equal(clsidQueries.length, 1, "同一 CLSID 只应解析一次，实际 " + String(clsidQueries.length) + " 次");
+});

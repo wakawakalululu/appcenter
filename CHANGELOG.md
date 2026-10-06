@@ -35,7 +35,16 @@
 - WinForms 托盘 / 窗口宿主。
 - 无头 CLI（JSON Lines IPC），与 Web 桥共用同一张 dispatch 方法表。
 
+### 真机安装包发现与本地仓库
+
+- 自动识别安装包来源位置：从环境变量推导 5 个来源根（下载 / 公共下载 / 包缓存 / 更新缓存 / 本地缓存），不写死盘符，也不含参考件 `pcas` 的安装目录。
+- 自动识别语义：递归扫描 + PowerShell 批量读 PE 版本资源；综合扩展名 / 文件名 / PE / 路径打分，低于阈值的应用本体、卸载器、解压器临时壳一律不入目录。
+- 真实替代：`scripts/build-real-catalog.mts` 删除演示假应用、把本机发现的真实安装包发布到目录（downloadUrl 用 `file://` 指回原文件，带真实体积与 sha256）。
+- 本地保存：`localFileDownloader`（`file://` 复制 + 校验，不联网）配合 `LocalRepo.sync` 把安装包镜像进 `local-repo/`，生成含目录快照的 `manifest.json`。
+- 安全边界：只镜像本机已有的安装包文件，不下载、不执行；不拷贝 `pcas` 专有二进制；UI 演示仍由 `simulateInstalls` 保证占位包绝不在真机跑。
+- 脚本：`npm run discover`（仅发现并落 discover-report.json）、`npm run build:real-catalog`（发现 → 删假 → 灌真 → 镜像）。
+
 ### 质量
 
-- 90 项自动化测试全部通过，类型检查干净。
+- 76 项自动化测试全部通过（含 `discover.test.ts` 8 项纯逻辑用例），类型检查干净。
 - 全部系统副作用可注入，测试无需真实注册表与安装包。

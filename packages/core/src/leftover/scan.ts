@@ -177,8 +177,9 @@ export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<Re
 
   await timed("registry", async () => {
     for (const root of UNINSTALL_ROOTS) {
-      const direct = await deps.reg.queryTree(root.path + SEP + app.regDir);
-      const stillThere = direct.find((k) => normPath(k.path) === normPath(app.registryPath));
+      // 只查这一条卸载项本身，不再递归整棵子树（卸载项下无子键）。
+      const direct = await deps.reg.readKey(root.path + SEP + app.regDir);
+      const stillThere = direct && normPath(direct.path) === normPath(app.registryPath) ? direct : undefined;
       if (stillThere) {
         items.push({
           kind: "registry",
@@ -190,8 +191,11 @@ export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<Re
       }
     }
     if (app.regDir && !app.regDir.startsWith("{")) {
+      const vendorRoots = vendorConfigRoots(app.regDir);
+      // 三个厂商配置根并行查询，省掉两次串行的进程启动往返。
+      const dumps = await Promise.all(vendorRoots.map((root) => deps.reg.queryTree(root)));
       const candidates: RegistryKey[] = [];
-      for (const root of vendorConfigRoots(app.regDir)) candidates.push(...(await deps.reg.queryTree(root)));
+      for (const dump of dumps) candidates.push(...dump);
       for (const key of candidates) {
         if (isUninstallPath(key.path) || normPath(key.path) === normPath(app.registryPath)) continue;
         if (!ownsTree(key, app.regDir)) continue;
@@ -219,8 +223,9 @@ export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<Re
     ].filter((hint) => hint.length > 3);
     const suspects = names.filter((p) => hints.some((hint) => p.toLowerCase().includes(hint))).slice(0, 40);
     for (const keyPath of suspects) {
-      const key = (await deps.reg.queryTree(keyPath)).find((k) => normPath(k.path) === normPath(keyPath));
-      if (!key) continue;
+      // 服务键下发常有 Parameters / Security 子键，只读键自身即可，避免递归白扫。
+      const key = await deps.reg.readKey(keyPath);
+      if (!key || normPath(key.path) !== normPath(keyPath)) continue;
       const imagePath = valueOf(key, "ImagePath");
       if (imagePath && references(anchors, imagePath)) {
         items.push({
@@ -235,8 +240,10 @@ export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<Re
   });
 
   await timed("startup", async () => {
-    for (const root of RUN_ROOTS) {
-      for (const key of await deps.reg.queryTree(root)) {
+    // 四个启动项根并行取数，再按原顺序处理，保证结果顺序不变。
+    const dumps = await Promise.all(RUN_ROOTS.map((root) => deps.reg.queryTree(root)));
+    for (let index = 0; index < RUN_ROOTS.length; index++) {
+      for (const key of dumps[index] ?? []) {
         for (const value of key.values) {
           const hit = references(anchors, value.data) || (exeName !== "" && basename(value.data) === exeName);
           if (hit) {

@@ -11,7 +11,9 @@
     "server": "node --experimental-transform-types packages/server/src/main.ts",
     "app": "node --experimental-transform-types packages/cli/src/main.ts",
     "ui": "node --experimental-transform-types packages/app/src/main.ts",
-    "smoke": "node --experimental-transform-types scripts/smoke.mts"
+    "smoke": "node --experimental-transform-types scripts/smoke.mts",
+    "discover": "node --experimental-transform-types scripts/discover-packages.mts",
+    "build:real-catalog": "node --experimental-transform-types scripts/build-real-catalog.mts"
   },
   "devDependencies": { "typescript": "^5.9.3", "@types/node": "^24.0.0" }
 }
