@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>服务端 API · AppCenter</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site">
+  <div class="wrap">
+    <div class="brand">App<span>Center</span></div>
+    <nav class="top">
+      <a href="index.html">首页</a>
+      <a href="architecture.html">架构</a>
+      <a href="rpc.html">RPC 协议</a>
+      <a href="server.html" class="active">服务端 API</a>
+      <a href="contributing.html">参与贡献</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="layout">
+    <aside class="toc">
+      <h4>本页</h4>
+      <ul>
+        <li><a href="#start">启动与配置</a></li>
+        <li><a href="#auth">令牌与角色</a></li>
+        <li><a href="#public">公开接口</a></li>
+        <li><a href="#approval">审批与通知</a></li>
+        <li><a href="#admin">管理接口</a></li>
+        <li><a href="#download">安装包下载</a></li>
+      </ul>
+    </aside>
+
+    <div>
+      <h1 style="font-size:32px;margin:34px 0 6px;">服务端 API</h1>
+      <p style="color:var(--muted);">目录、审批、鉴权、审计与安装包分发。</p>
+
+      <h2 id="start">启动与配置</h2>
+<pre><code>ADMIN_TOKEN=xxx \
+DB_FILE=/var/lib/appcenter/catalog.db \
+PACKAGE_ROOT=/srv/packages \
+  node --experimental-transform-types packages/server/src/main.ts --seed</code></pre>
+      <table>
+        <thead><tr><th>环境变量</th><th>作用</th></tr></thead>
+        <tbody>
+          <tr><td><code>ADMIN_TOKEN</code></td><td>管理员令牌；<strong>不配置时为开放模式</strong>，仅适合本地演示</td></tr>
+          <tr><td><code>DB_FILE</code></td><td>SQLite 路径，默认内存库</td></tr>
+          <tr><td><code>PACKAGE_ROOT</code></td><td>安装包存放根目录</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="auth">令牌与角色</h2>
+      <p>管理类接口需要 <code>Authorization: Bearer &lt;token&gt;</code>。令牌有两种来源：</p>
+      <ul>
+        <li>静态管理员令牌：直接使用 <code>ADMIN_TOKEN</code> 的值。</li>
+        <li>用户令牌：<code>POST /api/login</code> 签发，携带 <code>role</code>（<code>user</code> / <code>admin</code>）。库内只存令牌哈希。</li>
+      </ul>
+<pre><code>curl -X POST http://127.0.0.1:7991/api/login \
+  -H "content-type: application/json" \
+  -d '{"userId":"alice","role":"user"}'</code></pre>
+
+      <h2 id="public">公开接口</h2>
+      <table>
+        <thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>GET</td><td><code>/api/apps</code></td><td>应用列表，支持 <code>?department=</code> 过滤可见范围</td></tr>
+          <tr><td>GET</td><td><code>/api/apps/:id</code></td><td>应用详情（含版本与安装参数）</td></tr>
+          <tr><td>GET</td><td><code>/api/categories</code></td><td>分类树</td></tr>
+          <tr><td>GET</td><td><code>/api/ratings</code></td><td>各应用评分分布</td></tr>
+          <tr><td>GET</td><td><code>/api/banners</code></td><td>运营位</td></tr>
+          <tr><td>GET</td><td><code>/api/bundles</code></td><td>捆绑包（装机套装）</td></tr>
+          <tr><td>GET</td><td><code>/api/self-update</code></td><td>已发布的客户端新版本清单</td></tr>
+          <tr><td>POST</td><td><code>/api/apps/:id/receipt</code></td><td>客户端上报安装回执</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="approval">审批与通知</h2>
+      <table>
+        <thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>POST</td><td><code>/api/approvals</code></td><td>提交安装申请</td></tr>
+          <tr><td>GET</td><td><code>/api/approvals?applicant=</code></td><td>我的申请列表</td></tr>
+          <tr><td>POST</td><td><code>/api/approvals/:id/decide</code></td><td>审批（需管理员）</td></tr>
+          <tr><td>POST</td><td><code>/api/approvals/:id/grant</code></td><td>取安装凭证（签名、限时、一次性）</td></tr>
+          <tr><td>GET</td><td><code>/api/notifications?applicant=</code></td><td>通知（含通过与驳回结果）</td></tr>
+          <tr><td>POST</td><td><code>/api/notifications/:id/done</code></td><td>通知回执</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="admin">管理接口</h2>
+      <p>以下接口均需管理员角色，成功后写入 <code>audit_log</code>：</p>
+      <table>
+        <thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>POST</td><td><code>/api/admin/apps</code></td><td>发布 / 更新应用</td></tr>
+          <tr><td>DELETE</td><td><code>/api/admin/apps/:id</code></td><td>下架应用（连带版本）</td></tr>
+          <tr><td>POST</td><td><code>/api/admin/categories</code></td><td>分类维护</td></tr>
+          <tr><td>POST</td><td><code>/api/admin/self-update</code></td><td>发布客户端新版本</td></tr>
+          <tr><td>POST</td><td><code>/api/admin/banners</code>、<code>/api/admin/bundles</code></td><td>运营位与捆绑包</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="download">安装包下载</h2>
+      <p>
+        <code>GET /dl/&lt;file&gt;</code> 提供安装包，支持 <code>Range</code> 断点续传
+        （返回 <code>206</code> 与 <code>Content-Range</code>，并始终带 <code>Accept-Ranges: bytes</code>）。
+        客户端下载完成后必须校验 <code>sha256</code> 与体积才会进入安装态。
+      </p>
+    </div>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span>AppCenter · MIT License</span>
+    <span>·</span>
+    <a href="index.html">返回首页</a>
+  </div>
+</footer>
+</body>
+</html>

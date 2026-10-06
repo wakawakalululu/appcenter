@@ -1,0 +1,17 @@
+{
+  "name": "appcenter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/core", "packages/server", "packages/cli", "packages/app"],
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-transform-types --test \"packages/**/test/*.test.ts\"",
+    "server": "node --experimental-transform-types packages/server/src/main.ts",
+    "app": "node --experimental-transform-types packages/cli/src/main.ts",
+    "ui": "node --experimental-transform-types packages/app/src/main.ts",
+    "smoke": "node --experimental-transform-types scripts/smoke.mts"
+  },
+  "devDependencies": { "typescript": "^5.9.3", "@types/node": "^24.0.0" }
+}

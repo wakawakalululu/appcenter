@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参与贡献 · AppCenter</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site">
+  <div class="wrap">
+    <div class="brand">App<span>Center</span></div>
+    <nav class="top">
+      <a href="index.html">首页</a>
+      <a href="architecture.html">架构</a>
+      <a href="rpc.html">RPC 协议</a>
+      <a href="server.html">服务端 API</a>
+      <a href="contributing.html" class="active">参与贡献</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="layout">
+    <aside class="toc">
+      <h4>本页</h4>
+      <ul>
+        <li><a href="#env">环境</a></li>
+        <li><a href="#checks">提交前检查</a></li>
+        <li><a href="#conventions">代码约定</a></li>
+        <li><a href="#tests">测试约定</a></li>
+        <li><a href="#scope">范围红线</a></li>
+      </ul>
+    </aside>
+
+    <div>
+      <h1 style="font-size:32px;margin:34px 0 6px;">参与贡献</h1>
+      <p style="color:var(--muted);">MIT 协议，欢迎提交 issue 与 PR。</p>
+
+      <h2 id="env">环境</h2>
+      <p>需要 Node &gt;= 24。项目不使用打包器，TypeScript 由 Node 直接执行：</p>
+<pre><code>npm install
+npm run typecheck    # tsc -p tsconfig.json
+npm test             # node --test</code></pre>
+
+      <h2 id="checks">提交前检查</h2>
+      <ol>
+        <li><code>npm run typecheck</code> 无错误（已开启 <code>noUncheckedIndexedAccess</code>）。</li>
+        <li><code>npm test</code> 全部通过，且新增逻辑有对应测试。</li>
+        <li>不提交运行时数据：<code>*.db</code>、<code>runtime-config.json</code>、安装包等已由 <code>.gitignore</code> 排除。</li>
+      </ol>
+
+      <h2 id="conventions">代码约定</h2>
+      <ul>
+        <li>引擎层不引入 UI 框架；系统交互一律走可注入接口。</li>
+        <li>注释解释「为什么这样设计」，不逐行复述代码。</li>
+        <li>文件写入采用「临时文件 + rename」保证原子性。</li>
+        <li>危险操作（注册表写入/删除）默认 <code>dryRun</code>，并要求显式确认串。</li>
+      </ul>
+
+      <h2 id="tests">测试约定</h2>
+      <p>
+        测试用 <code>node --test</code>，按包分目录：<code>packages/*/test/*.test.ts</code>。
+        系统副作用一律替换为内存实现（<code>InMemoryRegClient</code>、<code>fakeRunner</code>、
+        <code>MemoryAutoStartBackend</code>），因此无需真实注册表与安装包即可运行。
+      </p>
+      <div class="note">
+        新增安装器类型时，请补一条矩阵用例：校验执行计划（程序名与参数）、
+        成功回读到版本号、失败时按开关清理安装包。
+      </div>
+
+      <h2 id="scope">范围红线</h2>
+      <p>以下内容<strong>不属于</strong>本项目范围，请勿以任何形式引入：</p>
+      <ul>
+        <li>终端管控：行为采集、Web 中间人、锁屏、远程桌面、驱动级进程拦截、静默保活</li>
+        <li>绕过授权、破解或绕过许可校验的实现</li>
+        <li>任何反编译、反汇编、代码还原的产物</li>
+        <li>第三方产品的二进制、素材与图标数据</li>
+      </ul>
+      <p>
+        贡献的功能请以<strong>独立设计</strong>方式实现：可参考公开文档与通用工程实践，
+        但不得复制他人实现的代码或资源。
+      </p>
+    </div>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span>AppCenter · MIT License</span>
+    <span>·</span>
+    <a href="index.html">返回首页</a>
+  </div>
+</footer>
+</body>
+</html>

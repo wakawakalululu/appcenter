@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>架构 · AppCenter</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site">
+  <div class="wrap">
+    <div class="brand">App<span>Center</span></div>
+    <nav class="top">
+      <a href="index.html">首页</a>
+      <a href="architecture.html" class="active">架构</a>
+      <a href="rpc.html">RPC 协议</a>
+      <a href="server.html">服务端 API</a>
+      <a href="contributing.html">参与贡献</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="layout">
+    <aside class="toc">
+      <h4>本页</h4>
+      <ul>
+        <li><a href="#layers">分层</a></li>
+        <li><a href="#ports">可注入端口</a></li>
+        <li><a href="#inventory">清单读取与缓存</a></li>
+        <li><a href="#runner">执行计划</a></li>
+        <li><a href="#cleanup">清理与回滚</a></li>
+        <li><a href="#security">鉴权与审计</a></li>
+      </ul>
+    </aside>
+
+    <div>
+      <h1 style="font-size:32px;margin:34px 0 6px;">架构</h1>
+      <p style="color:var(--muted);">一份纯逻辑引擎，外面套可替换的宿主与服务端。</p>
+
+      <h2 id="layers">分层</h2>
+      <table>
+        <thead><tr><th>层</th><th>位置</th><th>约束</th></tr></thead>
+        <tbody>
+          <tr><td>领域引擎</td><td><code>packages/core</code></td>
+              <td>不依赖 UI 框架；系统交互经接口注入，测试可整体替换</td></tr>
+          <tr><td>目录服务端</td><td><code>packages/server</code></td>
+              <td>纯 Node HTTP + SQLite；只暴露 JSON API 与 Range 下载</td></tr>
+          <tr><td>UI 宿主</td><td><code>packages/app</code> / <code>packages/cli</code></td>
+              <td>实现 <code>WindowHost</code>、订阅 <code>onJob</code>、调用 <code>dispatch</code></td></tr>
+        </tbody>
+      </table>
+      <p>
+        引擎对外的唯一门面是 <code>AppCenterFacade</code>；CLI、Web 桥与桌面壳
+        走的是同一张 <code>dispatch</code> 方法表，因此三种宿主行为一致。
+      </p>
+
+      <h2 id="ports">可注入端口</h2>
+      <p>系统相关的副作用全部收敛到少数几个接口，便于在测试中替换为内存实现：</p>
+      <table>
+        <thead><tr><th>接口</th><th>生产实现</th><th>测试实现</th></tr></thead>
+        <tbody>
+          <tr><td><code>RegClient</code></td><td><code>reg.exe</code> 只读查询</td><td><code>InMemoryRegClient</code></td></tr>
+          <tr><td><code>ProcessRunner</code></td><td><code>ChildProcessRunner</code></td><td><code>fakeRunner</code></td></tr>
+          <tr><td><code>WindowHost</code></td><td>WinForms 宿主 / Tauri</td><td><code>FakeHost</code></td></tr>
+          <tr><td><code>AutoStartBackend</code></td><td>写 <code>HKCU\...\Run</code></td><td><code>MemoryAutoStartBackend</code></td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="inventory">清单读取与缓存</h2>
+      <p>已装清单来自三个卸载根（HKLM 64 位、HKLM 32 位、HKCU）。为避免首屏被真实注册表扫描阻塞：</p>
+      <ol>
+        <li><strong>并行</strong>：三个根用 <code>Promise.all</code> 同时查询，而非串行累加。</li>
+        <li><strong>缓存</strong>：结果落盘为 <code>inventory-cache.json</code>（临时文件 + rename 原子替换），带 TTL 与指纹，命中即返回。</li>
+        <li><strong>增量刷新</strong>：缓存过期时先 <code>queryChildren</code> 拿到直接子键，再对单个 regDir 做窄查询（<code>readKey</code>），避免递归整棵树。</li>
+      </ol>
+
+      <h2 id="runner">执行计划</h2>
+      <p>
+        <code>defaultSilent(kind)</code> 为每种安装器给出默认静默参数，<code>buildPlan()</code>
+        负责把模板展开为可执行计划，并处理两个易错点：
+      </p>
+      <ul>
+        <li>NSIS 的 <code>/D=</code> 必须是最后一个参数，否则安装目录不生效。</li>
+        <li>脚本类安装包需要解释器前缀（<code>.ps1</code> → PowerShell，<code>.bat/.cmd</code> → cmd），否则会因「不是可执行程序」而失败。</li>
+      </ul>
+      <p>
+        编排器在安装进程退出后回读注册表确认真实已装版本；无论成功、失败还是异常，
+        都按 <code>installerCleanup</code> 开关删除已下载的安装包。
+      </p>
+
+      <h2 id="cleanup">清理与回滚</h2>
+      <p>
+        残留清理是「只读扫描 → 生成计划 → 显式确认 → 执行」的流程，注册表类操作会先
+        导出 <code>.reg</code> 备份并写 <code>backup-manifest.json</code>；没有备份目录会被直接拦截，
+        导出失败的条目不删除，撤销走 <code>cleanup.restore</code>。
+      </p>
+
+      <h2 id="security">鉴权与审计</h2>
+      <p>
+        服务端以「用户 / 角色令牌」取代单一静态令牌：<code>users</code> 与 <code>api_tokens</code>
+        两张表承载身份与令牌（库内只存令牌哈希），管理类路由校验角色，关键动作写入
+        <code>audit_log</code>。目录可按 <code>department</code> 下发可见范围。
+      </p>
+      <div class="note">
+        未配置 <code>ADMIN_TOKEN</code> 时服务以开放模式运行，便于本地演示；
+        对外部署务必配置令牌或签发用户令牌。
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span>AppCenter · MIT License</span>
+    <span>·</span>
+    <a href="index.html">返回首页</a>
+  </div>
+</footer>
+</body>
+</html>

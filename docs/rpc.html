@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RPC 协议 · AppCenter</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site">
+  <div class="wrap">
+    <div class="brand">App<span>Center</span></div>
+    <nav class="top">
+      <a href="index.html">首页</a>
+      <a href="architecture.html">架构</a>
+      <a href="rpc.html" class="active">RPC 协议</a>
+      <a href="server.html">服务端 API</a>
+      <a href="contributing.html">参与贡献</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="layout">
+    <aside class="toc">
+      <h4>本页</h4>
+      <ul>
+        <li><a href="#transport">传输方式</a></li>
+        <li><a href="#envelope">请求与响应</a></li>
+        <li><a href="#events">事件订阅</a></li>
+        <li><a href="#methods">方法分组</a></li>
+      </ul>
+    </aside>
+
+    <div>
+      <h1 style="font-size:32px;margin:34px 0 6px;">RPC 协议</h1>
+      <p style="color:var(--muted);">三种宿主共用同一张方法表，换宿主不改业务调用。</p>
+
+      <h2 id="transport">传输方式</h2>
+      <p>同一张 <code>dispatch</code> 方法表暴露在三个前端：</p>
+      <table>
+        <thead><tr><th>宿主</th><th>方式</th></tr></thead>
+        <tbody>
+          <tr><td>CLI 无头壳</td><td>stdin / stdout，JSON Lines，每行一个请求</td></tr>
+          <tr><td>本地 Web 桥</td><td><code>POST /rpc</code> + JSON</td></tr>
+          <tr><td>事件流</td><td><code>GET /events</code>，Server-Sent Events</td></tr>
+        </tbody>
+      </table>
+      <p>本地 Web 桥只监听 <code>127.0.0.1</code>，不对外暴露。</p>
+
+      <h2 id="envelope">请求与响应</h2>
+<pre><code>// 请求
+{"id":1,"method":"catalog.search","params":{"text":"wps"}}
+
+// 成功
+{"id":1,"result":{ ... }}
+
+// 失败
+{"id":1,"error":"unknown method: foo"}</code></pre>
+      <p>每条请求带自增或自定义 <code>id</code>，响应原样回带，便于并发匹配。</p>
+
+      <h2 id="events">事件订阅</h2>
+      <p>
+        <code>GET /events</code> 持续推送任务状态与托盘状态。任务状态机为
+        <code>queued → downloading → installing → succeeded</code>，另有
+        <code>awaiting_approval</code>、<code>needs_reboot</code>、<code>failed</code>、<code>cancelled</code> 分支。
+      </p>
+      <p>宿主订阅 <code>onJob</code> 即可驱动进度条与角标，无需轮询。</p>
+
+      <h2 id="methods">方法分组</h2>
+      <p>方法按域划分，稳定前缀如下：</p>
+      <table>
+        <thead><tr><th>前缀</th><th>用途</th><th>示例</th></tr></thead>
+        <tbody>
+          <tr><td><code>catalog.*</code></td><td>目录、分类、搜索、评分</td><td><code>catalog.search</code></td></tr>
+          <tr><td><code>inventory.*</code></td><td>本机已装清单</td><td><code>inventory.installed</code></td></tr>
+          <tr><td><code>residue.*</code></td><td>残留扫描与清理</td><td><code>residue.scan</code>、<code>cleanup.restore</code></td></tr>
+          <tr><td><code>install.*</code></td><td>安装任务与队列</td><td><code>install.enqueue</code>、<code>install.cancel</code></td></tr>
+          <tr><td><code>upgrade.*</code></td><td>升级计划</td><td><code>upgrade.plan</code></td></tr>
+          <tr><td><code>approval.*</code></td><td>申请审批与凭证</td><td><code>approval.request</code>、<code>approval.attachGrant</code></td></tr>
+          <tr><td><code>ui.*</code></td><td>窗口、托盘、皮肤</td><td><code>ui.tray</code>、<code>ui.trayAction</code>、<code>ui.skin</code></td></tr>
+          <tr><td><code>selfUpdate.*</code></td><td>客户端自升级</td><td><code>selfUpdate.check</code></td></tr>
+          <tr><td><code>config.*</code></td><td>运行配置（含自启开关）</td><td><code>config.updateRuntime</code></td></tr>
+        </tbody>
+      </table>
+      <div class="note">
+        方法名以仓库 <code>packages/app/src/dispatch.ts</code> 为准；新增方法请同步更新本表。
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span>AppCenter · MIT License</span>
+    <span>·</span>
+    <a href="index.html">返回首页</a>
+  </div>
+</footer>
+</body>
+</html>

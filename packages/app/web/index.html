@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>应用中心</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <button class="icon-btn" id="btn-back" aria-label="返回上一页" disabled>&larr;</button>
+      <div class="search" role="search">
+        <input id="search" type="search" placeholder="搜索软件名称、拼音、厂商或标签" autocomplete="off" aria-label="搜索软件" />
+        <span class="search-glyph" aria-hidden="true">⌕</span>
+      </div>
+      <div class="topbar-actions">
+        <span class="menu-host">
+          <button class="icon-btn" id="btn-menu" aria-label="菜单" aria-haspopup="true" aria-expanded="false">≡</button>
+          <div class="menu-pop" id="main-menu" role="menu" hidden>
+            <button role="menuitem" data-view="exclusive">专属应用</button>
+            <button role="menuitem" data-view="approvals">我的申请<span class="count" id="count-approvals"></span></button>
+            <button role="menuitem" data-view="cleanup">残留清理</button>
+            <button role="menuitem" data-view="settings">设置</button>
+            <span class="menu-sep" aria-hidden="true"></span>
+            <button role="menuitem" id="menu-upgrade-all">一键升级全部</button>
+            <button role="menuitem" id="menu-downloads">下载中心</button>
+          </div>
+        </span>
+        <button class="icon-btn badge-host" id="btn-downloads" aria-label="下载中心" aria-live="polite">
+          ⤓<span class="dot" id="dot-downloads" hidden></span>
+        </button>
+        <span class="spacer" aria-hidden="true"></span>
+        <button class="icon-btn" id="btn-min" aria-label="最小化">─</button>
+        <button class="icon-btn" id="btn-max" aria-label="最大化或还原">▢</button>
+        <button class="icon-btn close" id="btn-close" aria-label="关闭到托盘">✕</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav class="sidebar" aria-label="主导航">
+        <div class="brand-card">
+          <span class="brand-logo" aria-hidden="true">
+            <svg viewBox="0 0 40 40" width="38" height="38" fill="none">
+              <path d="M12 20a7 7 0 0 1 1.2-3.9A9 9 0 0 1 30 18.6 6.5 6.5 0 0 1 28.5 20H12Z" fill="currentColor" opacity="0.85"/>
+              <path d="M13 23h14l-1.6 8.2a2.5 2.5 0 0 1-2.5 2H17a2.5 2.5 0 0 1-2.5-2L13 23Z" fill="currentColor"/>
+              <path d="M17.5 23v-1.8a2.5 2.5 0 0 1 5 0V23" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <span class="brand-name">应用中心</span>
+        </div>
+        <ul class="nav-list">
+          <li><button class="nav active" data-view="home"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 1.8 9.9 5.6l4.2.6-3 3 .7 4.2L8 11.4l-3.8 2 .7-4.2-3-3 4.2-.6L8 1.8Z"/></svg></span>推荐</button></li>
+          <li><button class="nav" data-view="categories"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="5" rx="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2"/><rect x="2" y="9" width="5" height="5" rx="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2"/></svg></span>分类</button></li>
+          <li><button class="nav" data-view="installed"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 4.5h10M6.5 4.5V3.2a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.3M4.5 4.5l.7 8.3a1.4 1.4 0 0 0 1.4 1.3h2.8a1.4 1.4 0 0 0 1.4-1.3l.7-8.3M6.6 7.4v3.8M9.4 7.4v3.8"/></svg></span>卸载</button></li>
+          <li><button class="nav" data-view="upgrade"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13.5V3.5M4 7l4-3.8L12 7"/></svg></span>升级<span class="count" id="count-upgrade"></span></button></li>
+        </ul>
+        <div class="sidebar-foot">
+          <span class="tray-chip" id="tray-status">空闲</span>
+          <span class="brand-foot">应用中心 · 企业软件分发引擎</span>
+        </div>
+      </nav>
+
+      <main class="content">
+        <section id="view-home" class="view active" aria-label="推荐">
+          <div class="banners" id="banners"></div>
+          <section class="essential" aria-label="必备应用">
+            <div class="essential-head">
+              <h3>必备应用</h3>
+              <p>一键安装，快人一步</p>
+            </div>
+            <div class="essential-wall" id="essential-wall"></div>
+            <button class="primary" id="btn-bulk">一键装机</button>
+          </section>
+          <section class="bundles" id="bundles" aria-label="装机套装" hidden></section>
+          <div class="sections" id="sections"></div>
+        </section>
+
+        <section id="view-exclusive" class="view" aria-label="专属应用">
+          <div class="view-head"><h2>专属应用</h2><p>贵单位被授权独享的应用，安装策略由管理端配置。</p></div>
+          <div id="exclusive-grid" class="grid"></div>
+        </section>
+
+        <section id="view-categories" class="view" aria-label="分类">
+          <div class="view-head"><h2>分类</h2><p>按类别浏览全部软件，点左侧子分类可切换。</p></div>
+          <div class="split">
+            <ul id="category-tree" class="tree"></ul>
+            <div id="grid-category" class="grid"></div>
+          </div>
+        </section>
+
+        <section id="view-search" class="view" aria-label="搜索结果">
+          <div class="view-head"><h2>搜索结果</h2><p id="search-meta"></p></div>
+          <div id="grid-search" class="grid"></div>
+        </section>
+
+        <section id="view-installed" class="view" aria-label="卸载管理">
+          <div class="view-head"><h2>已安装</h2><p id="installed-meta"></p></div>
+          <div id="installed-list" class="rows"></div>
+        </section>
+
+        <section id="view-upgrade" class="view" aria-label="升级">
+          <div class="view-head"><h2>可升级</h2><p id="upgrade-meta"></p></div>
+          <div class="row-actions"><button class="primary" id="btn-upgrade-all">批量升级</button></div>
+          <div id="upgrade-list" class="rows"></div>
+        </section>
+
+        <section id="view-approvals" class="view" aria-label="我的申请">
+          <div class="view-head"><h2>我的申请</h2><p>受限软件需先取得安装凭证，凭证有效前不会开始下载。</p></div>
+          <div class="form-row">
+            <select id="approval-app" aria-label="选择应用"></select>
+            <input id="approval-reason" placeholder="申请理由，至少 4 个字符" aria-label="申请理由" />
+            <button class="primary" id="btn-approval-submit">提交申请</button>
+          </div>
+          <div id="approval-list" class="rows"></div>
+        </section>
+
+        <section id="view-cleanup" class="view" aria-label="残留清理">
+          <div class="view-head">
+            <h2>卸载残留清理</h2>
+            <p>扫描分九类统计（注册表、服务、启动项、计划任务、开始菜单、快捷方式、目录、用户数据、右键菜单）；清理默认试运行，执行需勾选风险、路径白名单与确认串，删除前自动导出 .reg 备份。</p>
+          </div>
+          <div class="form-row">
+            <input id="cleanup-name" placeholder="已安装软件名称" aria-label="软件名称" />
+            <button class="primary" id="btn-residue">扫描残留</button>
+          </div>
+          <div id="residue-report" class="rows"></div>
+          <div id="cleanup-plan" class="rows"></div>
+        </section>
+
+        <section id="view-settings" class="view" aria-label="设置">
+          <div class="view-head"><h2>设置</h2><p>皮肤、下载与安装、托盘与窗口状态。</p></div>
+          <div class="setting-grid">
+            <div class="setting-card">
+              <h3>皮肤</h3>
+              <select id="skin" aria-label="选择皮肤"></select>
+              <p id="skin-meta" class="card-sub"></p>
+            </div>
+            <div class="setting-card">
+              <h3>下载与安装</h3>
+              <p class="card-sub">下载缓存、并发数与安装包目录，保存在共享运行配置里。</p>
+              <div class="form-row"><label class="card-sub" for="set-download-dir">安装包目录</label><input id="set-download-dir" type="text" placeholder="留空则使用数据目录" /></div>
+              <div class="form-row"><label class="card-sub" for="set-concurrency">并发下载数</label><input id="set-concurrency" type="number" min="1" max="8" value="2" /></div>
+              <div class="form-row"><label class="card-sub" for="set-cleanup">安装成功后删除安装包</label><input id="set-cleanup" type="checkbox" /></div>
+              <div class="row-actions"><button class="primary" id="btn-save-runtime">保存配置</button></div>
+              <p class="card-sub" id="set-dirs"></p>
+              <p class="card-sub" id="runtime-issues"></p>
+            </div>
+            <div class="setting-card">
+              <h3>检查与通知</h3>
+              <p class="card-sub">定时检查升级与审批通知，随时可停。</p>
+              <div class="form-row"><label class="card-sub" for="set-interval">检查周期（分钟）</label><input id="set-interval" type="number" min="5" max="1440" value="60" /></div>
+              <div class="row-actions"><button class="primary" id="btn-start-checks">启动检查</button><button class="ghost" id="btn-stop-checks">停止</button></div>
+              <p class="card-sub" id="schedule-meta"></p>
+              <ul id="notification-list" class="plain-list"></ul>
+            </div>
+            <div class="setting-card">
+              <h3>托盘</h3>
+              <div class="tray-chip" id="tray-status-2">空闲</div>
+              <ul id="tray-menu" class="plain-list"></ul>
+            </div>
+            <div class="setting-card">
+              <h3>窗口</h3>
+              <ul id="window-list" class="plain-list"></ul>
+            </div>
+            <div class="setting-card">
+              <h3>客户端更新</h3>
+              <div class="row-actions">
+                <button class="primary" id="btn-selfupdate">检查更新</button>
+                <button class="ghost" id="btn-selfupdate-stage" disabled>下载更新包</button>
+                <button class="ghost" id="btn-selfupdate-apply" disabled>立即应用</button>
+              </div>
+              <p class="card-sub" id="selfupdate-meta"></p>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <aside id="downloads" class="drawer" aria-label="下载中心">
+        <div class="drawer-head"><h3>下载中心</h3><button id="downloads-close" class="ghost">关闭</button></div>
+        <div id="downloads-body" class="drawer-body"></div>
+      </aside>
+
+      <aside id="bundle-progress" class="bundle-panel" role="status" aria-live="polite" hidden>
+        <div class="bundle-head">
+          <strong id="bundle-title">捆绑安装</strong>
+          <span id="bundle-meta" class="card-sub"></span>
+          <button id="bundle-close" class="ghost" aria-label="收起进度面板">收起</button>
+        </div>
+        <div class="progress bundle-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bundle-bar"><i></i></div>
+        <ul id="bundle-list" class="bundle-list"></ul>
+      </aside>
+
+      <aside id="detail" class="drawer" aria-label="应用详情">
+        <div class="drawer-head"><h3 id="detail-name">应用详情</h3><button id="detail-close" class="ghost">关闭</button></div>
+        <div id="detail-body" class="drawer-body"></div>
+      </aside>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
