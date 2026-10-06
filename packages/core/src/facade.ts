@@ -22,7 +22,7 @@ import {
 import { ChildProcessRunner, type ProcessRunner } from "./runner/executor.ts";
 import { RuntimeConfigStore, type RuntimeConfig, type RuntimeConfigIssue } from "./runtime/config.ts";
 import { IconCache, iconSourceOf } from "./inventory/icons.ts";
-import { buildAssetSummary, type AssetSummary, type FleetReport } from "./inventory/heartbeat.ts";
+import { buildAssetSummary, type AssetSummary, type FleetDetail, type FleetReport } from "./inventory/heartbeat.ts";
 import {
   buildCatalogEntries,
   categorySections,
@@ -783,9 +783,14 @@ export class AppCenterFacade {
     return summary;
   }
 
-  /** 管理端：全部机器最近一次心跳与全局计数（需管理员令牌）。 */
-  fleet(): Promise<FleetReport> {
-    return this.remote.fleet();
+  /** 管理端：全部机器最近一次心跳与全局计数（需管理员令牌）；staleAfterHours 控制离线阈值。 */
+  fleet(staleAfterHours?: number): Promise<FleetReport> {
+    return this.remote.fleet(staleAfterHours);
+  }
+
+  /** 管理端：单机详情，最近快照 + 时序历史（需管理员令牌）。 */
+  fleetDetail(machineId: string, staleAfterHours?: number): Promise<FleetDetail> {
+    return this.remote.fleetDetail(machineId, staleAfterHours);
   }
 
   /** 分发回执：装上/没装上都要告诉服务端，管理端才看得见真实到达率。 */

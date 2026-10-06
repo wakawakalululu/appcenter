@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildAssetSummary, type AppSummary, type CatalogEntry, type InstallState } from "@appcenter/core";
+import { buildAssetSummary, stalenessOf, DEFAULT_STALE_AFTER_MS, type AppSummary, type CatalogEntry, type InstallState } from "@appcenter/core";
 
 const app = (over: Partial<AppSummary>): AppSummary => ({
   id: "a",
@@ -81,4 +81,36 @@ test("asset payload stays within the software-inventory scope boundary", () => {
   for (const forbidden of ["process", "behavior", "screen", "browser", "window", "keystroke", "hostname", "path"]) {
     assert.ok(!wire.includes(forbidden), "心跳不得包含 " + forbidden + " 一类的终端行为字段");
   }
+});
+
+test("stalenessOf flags offline machines by age against the threshold", () => {
+  const now = Date.parse("2026-10-06T12:00:00.000Z");
+  const fresh = new Date(now - 60_000).toISOString(); // 1 分钟前
+  const old = new Date(now - DEFAULT_STALE_AFTER_MS - 1000).toISOString(); // 刚过 24h
+
+  const f = stalenessOf(fresh, now);
+  assert.equal(f.stale, false);
+  assert.equal(f.ageMs, 60_000);
+
+  const o = stalenessOf(old, now);
+  assert.equal(o.stale, true);
+  assert.ok(o.ageMs > DEFAULT_STALE_AFTER_MS);
+
+  // 自定义阈值：同一时间戳在 0.5h 阈值下算离线，在 48h 阈值下算在线。
+  const half = stalenessOf(new Date(now - 3600_000).toISOString(), now, 1800_000);
+  assert.equal(half.stale, true, "1 小时前 > 0.5h 阈值 → 离线");
+  const wide = stalenessOf(new Date(now - 3600_000).toISOString(), now, 48 * 3600_000);
+  assert.equal(wide.stale, false, "1 小时前 < 48h 阈值 → 在线");
+});
+
+test("stalenessOf treats an unparseable or future timestamp defensively", () => {
+  const now = Date.parse("2026-10-06T12:00:00.000Z");
+  const junk = stalenessOf("not-a-date", now);
+  assert.equal(junk.stale, true, "解析不出来宁可判离线，不谎报在线");
+  assert.equal(junk.ageMs, Number.POSITIVE_INFINITY);
+
+  // 未来时间（时钟漂移）机龄夹到 0，不算离线。
+  const future = stalenessOf(new Date(now + 3600_000).toISOString(), now);
+  assert.equal(future.ageMs, 0);
+  assert.equal(future.stale, false);
 });

@@ -1,7 +1,7 @@
 import type { AppDetail, AppSummary, Category, RatingInput, RatingDistribution } from "./catalog/types.ts";
 import type { Grant } from "./approval/workflow.ts";
 import type { SelfUpdateManifest } from "./selfupdate/selfupdate.ts";
-import type { AssetSummary, FleetReport } from "./inventory/heartbeat.ts";
+import type { AssetSummary, FleetDetail, FleetReport } from "./inventory/heartbeat.ts";
 
 export interface ApprovalTicket {
   requestId: string;
@@ -112,9 +112,16 @@ export class RemoteCatalog {
     return this.request("/api/heartbeat", { method: "POST", body: JSON.stringify(summary) });
   }
 
-  /** 管理端：全部机器最近一次心跳与全局计数。 */
-  fleet(): Promise<FleetReport> {
-    return this.request("/api/admin/fleet");
+  /** 管理端：全部机器最近一次心跳与全局计数；staleAfterHours 控制离线阈值。 */
+  fleet(staleAfterHours?: number): Promise<FleetReport> {
+    const query = staleAfterHours === undefined ? "" : "?staleAfterHours=" + encodeURIComponent(String(staleAfterHours));
+    return this.request("/api/admin/fleet" + query);
+  }
+
+  /** 管理端：单机详情（最近快照 + 时序历史）。 */
+  fleetDetail(machineId: string, staleAfterHours?: number): Promise<FleetDetail> {
+    const query = staleAfterHours === undefined ? "" : "?staleAfterHours=" + encodeURIComponent(String(staleAfterHours));
+    return this.request("/api/admin/fleet/" + encodeURIComponent(machineId) + query);
   }
 }
 

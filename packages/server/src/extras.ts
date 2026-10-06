@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { DatabaseSync } from "node:sqlite";
-import type { AssetApp, FleetAgent } from "@appcenter/core";
+import { DEFAULT_STALE_AFTER_MS, stalenessOf, type AssetApp, type FleetAgent, type FleetHistoryPoint } from "@appcenter/core";
+
+/** 每台机器保留的历史心跳条数上限，超出即剪掉最旧的，避免时序表无限膨胀。 */
+const HISTORY_LIMIT = 100;
 
 /**
  * 应用中心的服务端补充能力，对应服务端架构设计 §5/§6：
@@ -14,6 +17,8 @@ const TABLES: string[] = [
   "CREATE TABLE IF NOT EXISTS bundles (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', app_ids TEXT NOT NULL DEFAULT '[]', sort_order INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)",
   // 机群资产心跳：每台机器一行，只存目录内应用安装态摘要与计数（无终端行为数据）。
   "CREATE TABLE IF NOT EXISTS heartbeats (machine_id TEXT PRIMARY KEY, app_version TEXT NOT NULL DEFAULT '', installed_count INTEGER NOT NULL DEFAULT 0, upgradable_count INTEGER NOT NULL DEFAULT 0, needs_approval_count INTEGER NOT NULL DEFAULT 0, pending_approvals INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL DEFAULT '{}', first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL)",
+  // 心跳时序：每次上报追加一行计数快照，按机器保留最近 HISTORY_LIMIT 条。
+  "CREATE TABLE IF NOT EXISTS heartbeat_history (seq INTEGER PRIMARY KEY AUTOINCREMENT, machine_id TEXT NOT NULL, installed_count INTEGER NOT NULL DEFAULT 0, upgradable_count INTEGER NOT NULL DEFAULT 0, needs_approval_count INTEGER NOT NULL DEFAULT 0, reported_at TEXT NOT NULL)",
 ];
 
 export interface Bundle {
@@ -144,7 +149,7 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
     return true;
   }
 
-  // 机群资产心跳：客户端周期性上报，服务端按 machineId 幂等 upsert，只保留最近一次。
+  // 机群资产心跳：客户端周期性上报，服务端按 machineId 幂等 upsert 最近一次，并追加一条时序快照。
   if (segments[0] === "api" && segments[1] === "heartbeat" && segments.length === 2 && method === "POST") {
     const input = await body(req);
     const machineId = String(input.machineId ?? "");
@@ -152,7 +157,9 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
     const installed = Array.isArray(input.installed) ? (input.installed as AssetApp[]) : [];
     const needsApproval = Array.isArray(input.needsApproval) ? input.needsApproval.map(String) : [];
     const counts = (input.counts ?? {}) as Record<string, unknown>;
-    const upgradable = installed.filter((app) => app?.upgradable === true).length;
+    const installedCount = Number(counts.installed ?? installed.length);
+    const upgradableCount = Number(counts.upgradable ?? installed.filter((app) => app?.upgradable === true).length);
+    const needsApprovalCount = Number(counts.needsApproval ?? needsApproval.length);
     const now = new Date().toISOString();
     const existing = ctx.db.prepare("SELECT first_seen_at FROM heartbeats WHERE machine_id = ?").get(machineId) as Record<string, unknown> | undefined;
     const firstSeen = existing ? String(existing.first_seen_at) : now;
@@ -160,37 +167,63 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
       .prepare(
         "INSERT INTO heartbeats (machine_id, app_version, installed_count, upgradable_count, needs_approval_count, pending_approvals, payload, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET app_version=excluded.app_version, installed_count=excluded.installed_count, upgradable_count=excluded.upgradable_count, needs_approval_count=excluded.needs_approval_count, pending_approvals=excluded.pending_approvals, payload=excluded.payload, last_seen_at=excluded.last_seen_at",
       )
-      .run(
-        machineId,
-        String(input.appVersion ?? ""),
-        Number(counts.installed ?? installed.length),
-        Number(counts.upgradable ?? upgradable),
-        Number(counts.needsApproval ?? needsApproval.length),
-        Number(counts.pendingApprovals ?? 0),
-        JSON.stringify({ installed, needsApproval }),
-        firstSeen,
-        now,
-      );
+      .run(machineId, String(input.appVersion ?? ""), installedCount, upgradableCount, needsApprovalCount, Number(counts.pendingApprovals ?? 0), JSON.stringify({ installed, needsApproval }), firstSeen, now);
+    // 时序快照只留计数；插入后按机器剪枝到最近 HISTORY_LIMIT 条。
+    ctx.db.prepare("INSERT INTO heartbeat_history (machine_id, installed_count, upgradable_count, needs_approval_count, reported_at) VALUES (?, ?, ?, ?, ?)").run(machineId, installedCount, upgradableCount, needsApprovalCount, now);
+    ctx.db
+      .prepare("DELETE FROM heartbeat_history WHERE machine_id = ? AND seq NOT IN (SELECT seq FROM heartbeat_history WHERE machine_id = ? ORDER BY seq DESC LIMIT ?)")
+      .run(machineId, machineId, HISTORY_LIMIT);
     send(res, 201, { ok: true, firstSeenAt: firstSeen, lastSeenAt: now });
     return true;
   }
-  if (segments[0] === "api" && segments[1] === "admin" && segments[2] === "fleet" && method === "GET") {
+  // 机群汇总（列表）：?staleAfterHours= 控制离线阈值，默认 24h。
+  if (segments[0] === "api" && segments[1] === "admin" && segments[2] === "fleet" && segments.length === 3 && method === "GET") {
     if (!ctx.requireAdmin(req)) return send(res, 403, { error: "admin token required" }), true;
+    const staleAfterMs = staleWindowMs(url);
+    const now = Date.now();
     const rows = ctx.db.prepare("SELECT * FROM heartbeats ORDER BY last_seen_at DESC, machine_id").all() as Record<string, unknown>[];
-    const agents = rows.map(toFleetAgent);
+    const agents = rows.map((row) => toFleetAgent(row, staleAfterMs, now));
     const totals = agents.reduce(
       (acc, a) => ({
         agents: acc.agents + 1,
         installed: acc.installed + a.counts.installed,
         upgradable: acc.upgradable + a.counts.upgradable,
         needsApproval: acc.needsApproval + a.counts.needsApproval,
+        stale: acc.stale + (a.stale ? 1 : 0),
       }),
-      { agents: 0, installed: 0, upgradable: 0, needsApproval: 0 },
+      { agents: 0, installed: 0, upgradable: 0, needsApproval: 0, stale: 0 },
     );
     send(res, 200, { agents, totals });
     return true;
   }
+  // 单机详情：最近快照 + 时序历史（按上报时间倒序）。
+  if (segments[0] === "api" && segments[1] === "admin" && segments[2] === "fleet" && segments[3] && method === "GET") {
+    if (!ctx.requireAdmin(req)) return send(res, 403, { error: "admin token required" }), true;
+    const machineId = decodeURIComponent(segments[3]);
+    const row = ctx.db.prepare("SELECT * FROM heartbeats WHERE machine_id = ?").get(machineId) as Record<string, unknown> | undefined;
+    if (!row) return send(res, 404, { error: "no such machine" }), true;
+    const staleAfterMs = staleWindowMs(url);
+    const agent = toFleetAgent(row, staleAfterMs, Date.now());
+    const historyRows = ctx.db.prepare("SELECT installed_count, upgradable_count, needs_approval_count, reported_at FROM heartbeat_history WHERE machine_id = ? ORDER BY seq DESC LIMIT ?").all(machineId, HISTORY_LIMIT) as Record<string, unknown>[];
+    const history: FleetHistoryPoint[] = historyRows.map((h) => ({
+      reportedAt: String(h.reported_at),
+      installed: Number(h.installed_count),
+      upgradable: Number(h.upgradable_count),
+      needsApproval: Number(h.needs_approval_count),
+    }));
+    send(res, 200, { agent, history });
+    return true;
+  }
   return false;
+}
+
+/** 离线阈值：?staleAfterHours= 覆盖默认 24h；非法值回落默认。 */
+function staleWindowMs(url: URL): number {
+  const raw = url.searchParams.get("staleAfterHours");
+  if (raw === null) return DEFAULT_STALE_AFTER_MS;
+  const hours = Number(raw);
+  if (!Number.isFinite(hours) || hours <= 0) return DEFAULT_STALE_AFTER_MS;
+  return hours * 60 * 60 * 1000;
 }
 
 function toBundle(row: Record<string, unknown>): Bundle {
@@ -225,7 +258,7 @@ function toBanner(row: Record<string, unknown>): Banner {
   };
 }
 
-function toFleetAgent(row: Record<string, unknown>): FleetAgent {
+function toFleetAgent(row: Record<string, unknown>, staleAfterMs: number = DEFAULT_STALE_AFTER_MS, now: number = Date.now()): FleetAgent {
   let installed: AssetApp[] = [];
   let needsApproval: string[] = [];
   try {
@@ -236,10 +269,12 @@ function toFleetAgent(row: Record<string, unknown>): FleetAgent {
     installed = [];
     needsApproval = [];
   }
+  const lastSeenAt = String(row.last_seen_at);
+  const { ageMs, stale } = stalenessOf(lastSeenAt, now, staleAfterMs);
   return {
     machineId: String(row.machine_id),
     appVersion: String(row.app_version),
-    reportedAt: String(row.last_seen_at),
+    reportedAt: lastSeenAt,
     installed,
     needsApproval,
     counts: {
@@ -249,6 +284,8 @@ function toFleetAgent(row: Record<string, unknown>): FleetAgent {
       pendingApprovals: Number(row.pending_approvals),
     },
     firstSeenAt: String(row.first_seen_at),
-    lastSeenAt: String(row.last_seen_at),
+    lastSeenAt,
+    lastSeenAgeMs: ageMs,
+    stale,
   };
 }

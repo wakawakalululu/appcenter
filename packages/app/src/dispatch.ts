@@ -94,7 +94,9 @@ export async function dispatch(facade: AppCenterFacade, method: string, params: 
       case "heartbeat.report":
         return { ok: true, result: await facade.reportHeartbeat() };
       case "fleet.summary":
-        return { ok: true, result: await facade.fleet() };
+        return { ok: true, result: await facade.fleet(params.staleAfterHours === undefined ? undefined : Number(params.staleAfterHours)) };
+      case "fleet.detail":
+        return { ok: true, result: await facade.fleetDetail(str("machineId"), params.staleAfterHours === undefined ? undefined : Number(params.staleAfterHours)) };
       case "bundle.list":
         return { ok: true, result: await facade.bundles() };
       case "bundle.install":

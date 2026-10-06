@@ -231,3 +231,59 @@ test("heartbeat endpoint rejects a payload without a machine id", async () => {
   });
   assert.equal(res.status, 400);
 });
+
+test("fleet detail accumulates heartbeat history newest-first", async () => {
+  const facade = await facadeFor("hist-pc");
+  await facade.reportHeartbeat();
+  await facade.reportHeartbeat();
+  await facade.reportHeartbeat();
+
+  const res = await fetch(base + "/api/admin/fleet/hist-pc", { headers: { authorization: "Bearer " + adminToken } });
+  assert.equal(res.status, 200);
+  const detail = (await res.json()) as { agent: { machineId: string }; history: { reportedAt: string }[] };
+  assert.equal(detail.agent.machineId, "hist-pc");
+  assert.equal(detail.history.length, 3, "三次上报应留三条时序快照");
+  const times = detail.history.map((h) => Date.parse(h.reportedAt));
+  assert.ok(times.every((t, i) => i === 0 || t <= (times[i - 1] ?? t)), "历史按上报时间倒序（seq DESC）");
+
+  const missing = await fetch(base + "/api/admin/fleet/nope-not-here", { headers: { authorization: "Bearer " + adminToken } });
+  assert.equal(missing.status, 404, "未知机器返回 404");
+  const denied = await fetch(base + "/api/admin/fleet/hist-pc");
+  assert.equal(denied.status, 403, "单机详情同样需要管理员鉴权");
+});
+
+test("fleet marks machines that stopped reporting as stale", async () => {
+  const old = new Date(Date.now() - 72 * 3600_000).toISOString(); // 3 天前
+  db.raw()
+    .prepare("INSERT INTO heartbeats (machine_id, app_version, installed_count, upgradable_count, needs_approval_count, pending_approvals, payload, first_seen_at, last_seen_at) VALUES ('ghost-pc','1.0.0',0,0,0,0,'{}',?,?) ON CONFLICT(machine_id) DO UPDATE SET last_seen_at=excluded.last_seen_at")
+    .run(old, old);
+
+  const report = (await (await fetch(base + "/api/admin/fleet", { headers: { authorization: "Bearer " + adminToken } })).json()) as {
+    agents: { machineId: string; stale: boolean; lastSeenAgeMs: number }[];
+    totals: { stale: number };
+  };
+  const ghost = report.agents.find((a) => a.machineId === "ghost-pc");
+  assert.ok(ghost && ghost.stale === true, "3 天未上报应判离线");
+  assert.ok(ghost!.lastSeenAgeMs > 0);
+  assert.ok(report.totals.stale >= 1, "全局计数应统计离线机器");
+  const fresh = report.agents.find((a) => a.machineId === "hist-pc");
+  assert.ok(fresh && fresh.stale === false, "刚上报过的机器不离线");
+
+  // 阈值放大到 240h，3 天前的机器重新算在线。
+  const wide = (await (await fetch(base + "/api/admin/fleet?staleAfterHours=240", { headers: { authorization: "Bearer " + adminToken } })).json()) as {
+    agents: { machineId: string; stale: boolean }[];
+  };
+  assert.equal(wide.agents.find((a) => a.machineId === "ghost-pc")?.stale, false);
+});
+
+test("heartbeat history is pruned to the retention limit per machine", async () => {
+  const mid = "prune-pc";
+  const insert = db.raw().prepare("INSERT INTO heartbeat_history (machine_id, installed_count, upgradable_count, needs_approval_count, reported_at) VALUES (?,0,0,0,?)");
+  for (let i = 0; i < 150; i++) insert.run(mid, new Date(Date.now() - (150 - i) * 1000).toISOString());
+
+  const facade = await facadeFor(mid);
+  await facade.reportHeartbeat(); // 触发插入 + 剪枝
+
+  const row = db.raw().prepare("SELECT COUNT(*) AS n FROM heartbeat_history WHERE machine_id = ?").get(mid) as { n: number };
+  assert.equal(Number(row.n), 100, "历史应被剪到保留上限（HISTORY_LIMIT=100）");
+});

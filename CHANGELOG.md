@@ -13,14 +13,17 @@
 
 - 新增 `POST /api/heartbeat`：按 machineId 幂等 upsert，只保留每台机器最近一次摘要与首末上报时间。
 - 新增 `GET /api/admin/fleet`：管理员鉴权，返回逐机记录与全局计数（在册机器 / 已装 / 可升级 / 待审批）。
+- 心跳时序留存：每次上报追加一条计数快照，按机器保留最近 100 条并自动剪枝。
+- 离线判定：`GET /api/admin/fleet` 支持 `?staleAfterHours=`（默认 24h），逐机返回 `stale` / `lastSeenAgeMs`，`totals` 增加 `stale` 计数。
+- 新增 `GET /api/admin/fleet/:machineId`：单机详情（最近快照 + 时序历史，按上报时间倒序）。
 
 ### 宿主与工具
 
-- dispatch 新增 `heartbeat.report` 与 `fleet.summary`，Web 桥与 CLI 同源可用。
+- dispatch 新增 `heartbeat.report`、`fleet.summary`（支持 `staleAfterHours`）与 `fleet.detail`，Web 桥与 CLI 同源可用。
 
 ### 质量
 
-- 109 项自动化测试全部通过（新增资产摘要范围边界、机群汇总往返与鉴权闸门用例），类型检查干净。
+- 114 项自动化测试全部通过（新增资产摘要范围边界、离线判定阈值、机群汇总往返、时序留存与剪枝、鉴权闸门用例），类型检查干净。
 
 ## 0.1.0 - 2026-10-06
 

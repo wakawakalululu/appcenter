@@ -64,12 +64,13 @@ curl -X POST http://127.0.0.1:7991/api/login \
 | POST | /api/admin/categories | 分类维护 |
 | POST | /api/admin/self-update | 发布客户端新版本 |
 | POST | /api/admin/banners、/api/admin/bundles | 运营位与捆绑包 |
-| GET | /api/admin/fleet | 机群资产汇总（逐机最近心跳 + 全局计数） |
+| GET | /api/admin/fleet | 机群资产汇总（逐机最近心跳 + 全局计数 + 离线判定） |
+| GET | /api/admin/fleet/:machineId | 单机详情（最近快照 + 时序历史） |
 
 ## 机群资产心跳
 
 客户端周期性把「本机目录应用的安装态摘要」上报到 `POST /api/heartbeat`，管理端用
-`GET /api/admin/fleet` 汇总查看覆盖率与到达率。
+`GET /api/admin/fleet` 汇总查看覆盖率、到达率与离线机器。
 
 ```bash
 curl -X POST http://127.0.0.1:7991/api/heartbeat \
@@ -80,8 +81,25 @@ curl -X POST http://127.0.0.1:7991/api/heartbeat \
        "counts":{"installed":1,"upgradable":0,"needsApproval":1,"pendingApprovals":0}}'
 ```
 
-服务端按 `machineId` 幂等 upsert，只保留每台机器最近一次摘要，并记录首次 / 最近上报时间。
-`fleet` 返回 `{ agents: [...], totals: { agents, installed, upgradable, needsApproval } }`。
+服务端按 `machineId` 幂等 upsert 最近一次摘要（记录首次 / 最近上报时间），并为每次上报
+追加一条时序计数快照（每台机器保留最近 100 条，超出自动剪枝）。
+
+**离线判定**：`GET /api/admin/fleet?staleAfterHours=N`（默认 24h）逐机返回 `stale` 与
+`lastSeenAgeMs`，`totals` 含 `stale` 计数。判定逻辑是 core 的纯函数 `stalenessOf`——
+时间戳解析不出来时按「无穷老」处理，宁可标离线也不谎报在线。
+
+```jsonc
+// GET /api/admin/fleet
+{
+  "agents": [{ "machineId": "pc-01", "lastSeenAt": "...", "lastSeenAgeMs": 116,
+               "stale": false, "counts": { "installed": 1, "upgradable": 0,
+               "needsApproval": 1, "pendingApprovals": 0 } }],
+  "totals": { "agents": 1, "installed": 1, "upgradable": 0, "needsApproval": 1, "stale": 0 }
+}
+```
+
+**单机详情**：`GET /api/admin/fleet/:machineId` 返回 `{ agent, history }`，`history` 为按
+上报时间倒序的计数快照，用于观察某台机器的安装态随时间的变化。
 
 **范围边界**：心跳只回答「分发下去的软件在这台机器上是什么状态」，上报面严格收敛在
 目录内应用的身份与版本（appId + version）与计数量；不采集进程列表、窗口、浏览记录、

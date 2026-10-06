@@ -79,10 +79,28 @@ export function buildAssetSummary(input: BuildAssetInput): AssetSummary {
   };
 }
 
-/** 管理端看到的单机记录（服务端存储后回填首次/最近上报时间）。 */
+/** 管理端看到的单机记录（服务端存储后回填首次/最近上报时间与离线判定）。 */
 export interface FleetAgent extends AssetSummary {
   firstSeenAt: string;
   lastSeenAt: string;
+  /** 距最近一次上报的毫秒数；无法解析时为 +∞。 */
+  lastSeenAgeMs: number;
+  /** 超过 staleAfter 阈值未上报即视为离线。 */
+  stale: boolean;
+}
+
+/** 一台机器的一次历史心跳快照（只留计数，不留全量清单，避免时序表膨胀）。 */
+export interface FleetHistoryPoint {
+  reportedAt: string;
+  installed: number;
+  upgradable: number;
+  needsApproval: number;
+}
+
+/** 管理端单机详情：最近快照 + 时序历史。 */
+export interface FleetDetail {
+  agent: FleetAgent;
+  history: FleetHistoryPoint[];
 }
 
 /** 管理端机群汇总：逐机记录 + 全局计数。 */
@@ -93,5 +111,24 @@ export interface FleetReport {
     installed: number;
     upgradable: number;
     needsApproval: number;
+    /** 离线（超过阈值未上报）的机器数。 */
+    stale: number;
   };
+}
+
+/** 默认离线阈值：24 小时未上报即视为离线。 */
+export const DEFAULT_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 离线判定纯函数：给定最近上报时间与阈值，算出机龄与是否离线。
+ * 无法解析的时间戳按「无穷老」处理，宁可标离线也不谎报在线。
+ */
+export function stalenessOf(
+  lastSeenAt: string,
+  now: number = Date.now(),
+  staleAfterMs: number = DEFAULT_STALE_AFTER_MS,
+): { ageMs: number; stale: boolean } {
+  const parsed = Date.parse(lastSeenAt);
+  const ageMs = Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : Math.max(0, now - parsed);
+  return { ageMs, stale: ageMs > staleAfterMs };
 }
