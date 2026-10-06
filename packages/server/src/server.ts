@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { DatabaseSync } from "node:sqlite";
@@ -731,6 +732,22 @@ export function seedDemo(db: CatalogDb): void {
   ];
   for (const entry of apps) db.upsertApp(entry.detail, entry.versions);
 
+  // 补足每类到 ≥3 个应用，让首页分类卡撑满 3 行，避免分类卡片高矮不齐。ui-demo 自带的 2 条 banner 已覆盖运营位。
+  const extraApps: { detail: AppDetail; versions: AppVersion[] }[] = [
+    { detail: { id: "pdf-tool", name: "云 PDF 工具", searchKeys: ["pdf", "pdftool"], publisher: "轻记团队", categoryId: "office-doc", iconUrl: gen("pdf-tool"), latestVersion: "2.2.0", downloadCount: 2600, badge: "normal", tags: ["PDF"], requiresApproval: false, sizeBytes: 58 * mb, description: "合并、拆分与 OCR 一体的 PDF 工具。", screenshots: [], versions: [] }, versions: [{ version: "2.2.0", releasedAt: "2026-08-10", sizeBytes: 58 * mb, sha256: "g".repeat(64), downloadUrl: "/dl/pdf-2.2.0.exe", releaseNotes: "OCR 提速", silent: nsis }] },
+    { detail: { id: "terminal-plus", name: "终端增强", searchKeys: ["terminal", "cmd"], publisher: "工具组", categoryId: "dev", iconUrl: gen("terminal-plus"), latestVersion: "1.8.0", downloadCount: 1500, badge: "normal", tags: ["开发"], requiresApproval: false, sizeBytes: 36 * mb, description: "分屏、远程与脚本一体化的终端。", screenshots: [], versions: [] }, versions: [{ version: "1.8.0", releasedAt: "2026-08-12", sizeBytes: 36 * mb, sha256: "h".repeat(64), downloadUrl: "/dl/term-1.8.0.exe", releaseNotes: "分屏优化", silent: nsis }] },
+    { detail: { id: "password-vault", name: "密码保险箱", searchKeys: ["vault", "password"], publisher: "盾安科技", categoryId: "security", iconUrl: gen("password-vault"), latestVersion: "4.3.0", downloadCount: 1100, badge: "normal", tags: ["安全"], requiresApproval: false, sizeBytes: 42 * mb, description: "团队密钥集中托管与自动填充。", screenshots: [], versions: [] }, versions: [{ version: "4.3.0", releasedAt: "2026-08-14", sizeBytes: 42 * mb, sha256: "i".repeat(64), downloadUrl: "/dl/vault-4.3.0.exe", releaseNotes: "自动填充", silent: nsis }] },
+    { detail: { id: "mail-client", name: "企业邮箱", searchKeys: ["mail", "email"], publisher: "协通软件", categoryId: "office-im", iconUrl: gen("mail-client"), latestVersion: "3.0.1", downloadCount: 5000, badge: "normal", tags: ["邮件"], requiresApproval: false, sizeBytes: 120 * mb, description: "组织通讯录即插即用的邮件客户端。", screenshots: [], versions: [] }, versions: [{ version: "3.0.1", releasedAt: "2026-08-16", sizeBytes: 120 * mb, sha256: "j".repeat(64), downloadUrl: "/dl/mail-3.0.1.exe", releaseNotes: "通讯录同步", silent: nsis }] },
+    { detail: { id: "calendar-sync", name: "日程同步", searchKeys: ["calendar", "schedule"], publisher: "协通软件", categoryId: "office-im", iconUrl: gen("calendar-sync"), latestVersion: "2.1.0", downloadCount: 4700, badge: "normal", tags: ["日程"], requiresApproval: false, sizeBytes: 64 * mb, description: "会议与日程跨端同步。", screenshots: [], versions: [] }, versions: [{ version: "2.1.0", releasedAt: "2026-08-18", sizeBytes: 64 * mb, sha256: "k".repeat(64), downloadUrl: "/dl/cal-2.1.0.exe", releaseNotes: "跨端同步", silent: nsis }] },
+    { detail: { id: "podcast-app", name: "播客电台", searchKeys: ["podcast", "radio"], publisher: "声线网络", categoryId: "media-music", iconUrl: gen("podcast-app"), latestVersion: "5.4.0", downloadCount: 8000, badge: "normal", tags: ["播客"], requiresApproval: false, sizeBytes: 70 * mb, description: "订阅与离线收听的播客客户端。", screenshots: [], versions: [] }, versions: [{ version: "5.4.0", releasedAt: "2026-08-20", sizeBytes: 70 * mb, sha256: "l".repeat(64), downloadUrl: "/dl/podcast-5.4.0.exe", releaseNotes: "离线收听", silent: nsis }] },
+    { detail: { id: "audio-editor", name: "音频剪辑", searchKeys: ["audio", "editor"], publisher: "光影工坊", categoryId: "media-music", iconUrl: gen("audio-editor"), latestVersion: "4.0.2", downloadCount: 6800, badge: "normal", tags: ["音频"], requiresApproval: false, sizeBytes: 88 * mb, description: "多轨录音与降噪剪辑。", screenshots: [], versions: [] }, versions: [{ version: "4.0.2", releasedAt: "2026-08-22", sizeBytes: 88 * mb, sha256: "m".repeat(64), downloadUrl: "/dl/audio-4.0.2.exe", releaseNotes: "降噪增强", silent: nsis }] },
+    { detail: { id: "stream-rec", name: "直播录制", searchKeys: ["stream", "record"], publisher: "映速传媒", categoryId: "media-video", iconUrl: gen("stream-rec"), latestVersion: "3.3.0", downloadCount: 6500, badge: "normal", tags: ["直播"], requiresApproval: false, sizeBytes: 102 * mb, description: "一键抓取并剪辑直播回放。", screenshots: [], versions: [] }, versions: [{ version: "3.3.0", releasedAt: "2026-08-24", sizeBytes: 102 * mb, sha256: "n".repeat(64), downloadUrl: "/dl/stream-3.3.0.exe", releaseNotes: "画质提升", silent: nsis }] },
+    { detail: { id: "video-convert", name: "视频转换", searchKeys: ["convert", "video"], publisher: "映速传媒", categoryId: "media-video", iconUrl: gen("video-convert"), latestVersion: "2.7.1", downloadCount: 5200, badge: "normal", tags: ["转换"], requiresApproval: false, sizeBytes: 94 * mb, description: "批量格式转换与压缩。", screenshots: [], versions: [] }, versions: [{ version: "2.7.1", releasedAt: "2026-08-26", sizeBytes: 94 * mb, sha256: "o".repeat(64), downloadUrl: "/dl/convert-2.7.1.exe", releaseNotes: "批量加速", silent: nsis }] },
+    { detail: { id: "phone-mirror", name: "手机镜像", searchKeys: ["mirror", "phone"], publisher: "云屏科技", categoryId: "mobile", iconUrl: gen("phone-mirror"), latestVersion: "1.9.0", downloadCount: 3900, badge: "normal", tags: ["镜像"], requiresApproval: false, sizeBytes: 76 * mb, description: "把手机画面镜像到桌面。", screenshots: [], versions: [] }, versions: [{ version: "1.9.0", releasedAt: "2026-08-28", sizeBytes: 76 * mb, sha256: "p".repeat(64), downloadUrl: "/dl/mirror-1.9.0.exe", releaseNotes: "低延迟", silent: nsis }] },
+    { detail: { id: "app-lite", name: "应用商店精简版", searchKeys: ["store", "app"], publisher: "云屏科技", categoryId: "mobile", iconUrl: gen("app-lite"), latestVersion: "1.2.3", downloadCount: 3600, badge: "normal", tags: ["商店"], requiresApproval: false, sizeBytes: 54 * mb, description: "轻量应用分发与更新。", screenshots: [], versions: [] }, versions: [{ version: "1.2.3", releasedAt: "2026-08-30", sizeBytes: 54 * mb, sha256: "q".repeat(64), downloadUrl: "/dl/applite-1.2.3.exe", releaseNotes: "首版上架", silent: nsis }] },
+  ];
+  for (const entry of extraApps) db.upsertApp(entry.detail, entry.versions);
+
   const votes: [string, string, number, boolean, string, string][] = [
     ["wps-office", "u1", 5, true, "常用", "2026-09-21"],
     ["wps-office", "u2", 4, true, "还行", "2026-09-22"],
@@ -760,6 +777,31 @@ export function seedDemo(db: CatalogDb): void {
  * 只服务于 demo/测试环境——生产环境的包由发布方上传。
  */
 export function materializeDemoPackages(db: CatalogDb, packageRoot: string): { files: number; bytes: number } {
-  const { mkdirSync, writeFileSync } = ((): typeof import("node:fs") => require("node:fs"))();
-  return { files: 0, bytes: 0 };
+  mkdirSync(packageRoot, { recursive: true });
+  let files = 0;
+  let bytes = 0;
+  for (const summary of db.summaries()) {
+    const detail = db.detail(summary.id);
+    if (!detail) continue;
+    for (const version of detail.versions) {
+      const seed = detail.id + "@" + version.version;
+      let hash = 2166136261;
+      for (const ch of seed) {
+        hash ^= ch.codePointAt(0) ?? 0;
+        hash = Math.imul(hash, 16777619) >>> 0;
+      }
+      const size = 96 * 1024 + (hash % 384) * 1024;
+      const header = Buffer.from("appcenter demo package\npackage: " + seed + "\n", "utf8");
+      const body = Buffer.alloc(size);
+      header.copy(body, 0);
+      const pattern = createHash("sha256").update(seed).digest();
+      for (let i = header.length; i < size; i++) body[i] = pattern[i % pattern.length]! ^ (i & 0xff);
+      const fileName = version.downloadUrl.split("?")[0]?.split("/").pop() ?? seed + ".bin";
+      writeFileSync(path.join(packageRoot, fileName), body);
+      db.putVersion(detail.id, { ...version, sizeBytes: size, sha256: createHash("sha256").update(body).digest("hex") });
+      files += 1;
+      bytes += size;
+    }
+  }
+  return { files, bytes };
 }

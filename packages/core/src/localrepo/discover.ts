@@ -329,7 +329,16 @@ export interface DiscoverReport {
  */
 export function packageToCatalogApp(pkg: DiscoveredPackage, sha256: string, silentKind?: string): AppDetail {
   const id = packageId(pkg);
-  const version = pkg.appVersion === "0.0.0" ? "0.0.0" : pkg.appVersion;
+  /**
+   * PE 探测拿不到版本时 appVersion 是占位的 "0.0.0"，而厂商文件名里往往就写着版本号
+   * （`DittoSetup_64bit_3_24_246_0.exe` → 3.24.246.0）。旧写法是
+   * `pkg.appVersion === "0.0.0" ? "0.0.0" : pkg.appVersion`——两个分支同一个值，等于没兜底。
+   */
+  const fileNameVersion = parseInstallerName(pkg.candidate.file).version;
+  const version = pkg.appVersion && pkg.appVersion !== "0.0.0" ? pkg.appVersion : fileNameVersion ?? pkg.appVersion ?? "0.0.0";
+  const isMsi = pkg.candidate.extension === ".msi";
+  // .msp 是 Windows Installer 补丁：既不能按 NSIS 传 `/S /D=`，也不能用 msi 的 `/i`（打补丁是 /p）。
+  const isMsp = pkg.candidate.extension === ".msp";
   return {
     id,
     name: pkg.name,
@@ -354,10 +363,15 @@ export function packageToCatalogApp(pkg: DiscoveredPackage, sha256: string, sile
         downloadUrl: pathToFileURL(pkg.candidate.file).href,
         releaseNotes: pkg.installed ? `本机已装 ${pkg.installed.displayName} ${pkg.installed.displayVersion}` : "",
         silent: {
-          kind: (silentKind ?? (pkg.candidate.extension === ".msi" ? "msi" : "nsis")) as InstallerKind,
-          installArgs: pkg.candidate.extension === ".msi" ? ["/i", "{file}", "/qn", "/norestart"] : ["/S", "/D={target}"],
-          uninstallArgs: pkg.candidate.extension === ".msi" ? ["/x", "{file}", "/qn"] : ["/S"],
-          requiresAdmin: pkg.candidate.extension === ".msi",
+          kind: (silentKind ?? (isMsi || isMsp ? "msi" : "nsis")) as InstallerKind,
+          installArgs: isMsp
+            ? ["/p", "{file}", "/qn", "REBOOT=ReallySuppress"]
+            : isMsi
+              ? ["/i", "{file}", "/qn", "/norestart"]
+              : ["/S", "/D={target}"],
+          // 补丁没有「单独卸载这个 .msp」的命令入口，回退由系统更新列表负责，这里不给参数而不是硬套 msi 的 /x。
+          uninstallArgs: isMsp ? [] : isMsi ? ["/x", "{file}", "/qn"] : ["/S"],
+          requiresAdmin: isMsi || isMsp,
         },
       },
     ],
@@ -378,10 +392,11 @@ export function guessCategory(pkg: DiscoveredPackage): string {
   const text = (pkg.name + " " + (pkg.version?.fileDescription ?? "") + " " + pkg.candidate.file).toLowerCase();
   if (/(sdk|driver|redist|visual c\+\+|runtime|framework)/.test(text)) return "dev";
   if (/(ide|code|editor|git|debug)/.test(text)) return "dev";
-  if (/(office|wps|pdf|doc|note|笔记)/.test(text)) return "office-doc";
+  // 短词必须带边界，否则 `im` 会把 "image" 判成通讯、`doc` 会把 "docker" 判成办公软件。
+  if (/(office|wps|pdf|\bdocs?\b|\bdocument|\bnote|笔记)/.test(text)) return "office-doc";
   if (/(player|music|video|monitor|traffic|游戏|影音|音乐)/.test(text)) return "media";
   if (/(安全|防护|antivirus|security|guard|远程|remote|vpn)/.test(text)) return "security";
-  if (/(输入法|input|cloud|盘|mail|通讯|im)/.test(text)) return "office-doc";
+  if (/(输入法|\binput|cloud|盘|\bmail\b|通讯|\bim\b)/.test(text)) return "office-doc";
   return "other";
 }
 

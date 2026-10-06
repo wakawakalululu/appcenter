@@ -28,8 +28,24 @@ function normalizeName(value: string): string {
   return value.normalize("NFKC").toLowerCase().replace(/[\s\-_·．.]+/g, "");
 }
 
+/**
+ * 去掉版本类后缀。注意归一化已经把点号删掉了，所以旧写法里 `\d+(\.\d+)+$` 这一支**永远匹配不上**；
+ * 归一化后的版本号是一串裸数字，要按尾部数字串来剥才真能吃到 `WPS Office (12.1.0.28488)` 这类带版本的显示名。
+ */
 function stripVersionSuffix(value: string): string {
-  return normalizeName(value).replace(/(正式版|版|pro|enterprise|x\d+|\d+(\.\d+)+)$/g, "");
+  return normalizeName(value).replace(/(正式版|版|pro|enterprise|x\d+|\d+)$/g, "");
+}
+
+/**
+ * 子串命中的收口。真机测量出的误配是 `Git` ⊂ `vs_githubprotocolhandlermsi`、`微信` ⊂ `企业微信`
+ * （旧写法是无界 `includes`，双向都算命中）；而唯一合法的命中 `WPS Office` ⊂ `WPS Office (12.1.0.28488)`
+ * 是**前缀**关系。只按长度卡会误伤 `钉钉` ⊂ `钉钉6.5.0` 这类短名产品，
+ * 所以规则是：短的必须是长的前缀，且短于 5 字符时后面必须紧跟版本号数字。
+ */
+function prefixHit(shorter: string, longer: string): boolean {
+  if (!shorter || shorter === longer) return false;
+  if (!longer.startsWith(shorter)) return false;
+  return shorter.length >= 5 || /^\d/.test(longer.slice(shorter.length));
 }
 
 export function matchInstalled(app: AppSummary, installed: readonly InstalledApp[]): { app: InstalledApp | null; quality: number } {
@@ -41,7 +57,7 @@ export function matchInstalled(app: AppSummary, installed: readonly InstalledApp
     const stem = stripVersionSuffix(item.displayName);
     let quality = 0;
     if (name === target) quality = 3;
-    else if (name.includes(target) || target.includes(name)) quality = 2;
+    else if (prefixHit(target, name) || prefixHit(name, target)) quality = 2;
     else if (stem === targetStem && targetStem.length > 3) quality = 2;
     else if (app.publisher && item.publisher && normalizeName(item.publisher).includes(normalizeName(app.publisher))) quality = 1;
     if (quality > best.quality) best = { app: item, quality };
@@ -75,10 +91,16 @@ function categoryTrail(categories: readonly Category[], categoryId: string): str
 export function buildCatalogEntries(input: BuildInput): CatalogEntry[] {
   return input.apps.map((app) => {
     const match = matchInstalled(app, input.installed);
-    const installedVersion = match.quality >= 2 ? match.app?.displayVersion ?? null : null;
+    // 匹配到本机条目不等于知道版本号：真机不少卸载项的 DisplayVersion 是空串而不是缺失，
+    // 空串一旦进 compare() 就会被当成 0，导致这个应用永远显示「可升级」。
+    const detected = match.quality >= 2 && match.app !== null;
+    const rawVersion = detected ? match.app?.displayVersion ?? "" : "";
+    const installedVersion = rawVersion.trim() === "" ? null : rawVersion;
     const upgradable = installedVersion !== null && compare(app.latestVersion, installedVersion) > 0;
     const needsApproval = app.requiresApproval && !(input.granted?.has(app.id) ?? false);
-    const installState: InstallState = needsApproval && installedVersion === null ? "needs-approval" : upgradable ? "upgradable" : installedVersion ? "installed" : needsApproval ? "needs-approval" : "not-installed";
+    // 审批只挡「会写入的动作」：没装、或确实有新版待装时才转成申请；
+    // 已装且已是最新无需安装，不该把状态说成待审批。
+    const installState: InstallState = needsApproval && (!detected || upgradable) ? "needs-approval" : upgradable ? "upgradable" : detected ? "installed" : "not-installed";
     const action: PrimaryAction = installState === "upgradable" ? "upgrade" : installState === "installed" ? "open" : installState === "needs-approval" ? "request" : "install";
     const versions = input.latestVersions?.[app.id] ?? [];
     return {

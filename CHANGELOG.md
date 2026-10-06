@@ -25,13 +25,30 @@
 - 离线判定：`GET /api/admin/fleet` 支持 `?staleAfterHours=`（默认 24h），逐机返回 `stale` / `lastSeenAgeMs`，`totals` 增加 `stale` 计数。
 - 新增 `GET /api/admin/fleet/:machineId`：单机详情（最近快照 + 时序历史，按上报时间倒序）。
 
+### 引擎（packages/core）
+
+- 本地应用包仓库（`localrepo/repo.ts`）：`LocalRepo.sync` 把目录里所有应用的安装包（默认最新版，`allVersions` 可选全部历史）经断点续传下载、sha256+体积双校验后持久化到 `<root>/<appId>/<version><ext>`，并生成自描述 `manifest.json`（逐包索引 + 全量目录快照）；缓存命中跳过下载、失败逐包记录下一轮自动重试（`attempts` 累计）、`status` 按磁盘事实重算 saved/failed/pending、清单原子写。`verify:"sha256"` 档位可识破同长度篡改的缓存文件。相对 `downloadUrl` 由 facade 以 `serverUrl` 补全。
+- `facade` 新增 `syncLocalRepo` / `localRepoStatus`；`installMode: silent | manual` 贯通 types → apps 表（旧库自动补列）→ 视图 → RPC：手动安装的执行计划剥掉静默参数（MSI 只留 `/i`+包路径、NSIS/Inno 弹向导，卸载语义不变）。
+
+### 服务端（packages/server）
+
+- 新增 `materializeDemoPackages(db, packageRoot)`：把演示目录每个版本物化成确定性生成的真实安装包文件并回写真 sha256/体积，让「下载 → 续传 → 校验 → 落地 → 入清单」整条链路在 demo/测试里可真跑。
+
 ### 宿主与工具
 
+- 桌面应用窗口（`packages/app/src/desktop.ts`，`npm run desktop`）：一条命令拉起目录服务 + 引擎 + 桥并打开 Edge/Chrome `--app` **独立桌面窗口**——无标签页/地址栏、任务栏独立图标、品牌 favicon 作窗口图标，窗口初始几何取工作区的 60.4% × 66.1%（最小 900×600，居中），独立 user-data-dir 不复用日常浏览器会话；`?shell=app` 时 UI 隐藏自绘窗口控制按钮交给 OS 标题条。作为「网页 → 桌面端」迁移的第 2 层，Tauri（第 3 层）待 Rust 工具链就绪后换壳即可，UI 代码三层同源。
+- bridge 新增 `/favicon.svg` 品牌图标（云 + 购物袋，自绘原创），`index.html` 挂 `<link rel="icon">`。
 - dispatch 新增 `heartbeat.report`、`fleet.summary`（支持 `staleAfterHours`）与 `fleet.detail`，Web 桥与 CLI 同源可用。
+- dispatch 新增 `repo.sync` / `repo.status`；CLI 新增 `repo-sync [--all-versions] [--dir=PATH]` 与 `repo-status`；设置页新增「本地应用包仓库」卡片（同步最新版/全部版本、状态盘点、逐包路径清单）。
+- 首屏骨架屏：banner 与分类卡在数据到达前给 shimmer 占位（`prefers-reduced-motion` 下停用动画）。
+- 生成式演示图标路由 `/icons/gen/<seed>.svg`（哈希色相 + 首字母瓷贴）；行内按钮三态语义（打开/一键安装▾/手动安装）、行名称区可点开详情、必备应用条无标签图标墙、细滚动条。
+- 新增 `scripts/capture-window.ps1`：按窗口标题 PrintWindow 截真实桌面窗口，供桌面壳取证。
 
 ### 质量
 
-- 127 项自动化测试全部通过（在资产摘要范围边界、离线判定阈值、机群汇总往返、时序留存与剪枝、鉴权闸门之外，新增清单刷新的批处理契约、变更/新增/卸载合并、读空保留最后已知、深层嵌套发现与指纹按全路径去碰撞，右键菜单并发预解析与同根去重，装后回读的「唯一命中 / 请求版本定位 / 多义判未命中」与前置取最高，四段版本号逐段比较，以及 UTF-16 计划任务文件解码与残留检出用例），类型检查干净。
+- CI 重写（`.github/workflows/ci.yml`）：`windows-latest` 跑全链（typecheck + 全部测试 + 真机冒烟，注册表/托盘能力在 ubuntu 上跑不全）、`npm ci` + 依赖缓存、同分支并发取消、job 级 timeout；新增 demo job 起演示环境并用无头浏览器逐视图截图，截图随 artifact 产出。`package.json` 新增 `ci` / `demo` / `shots` 单一入口。
+- 文档：README 补 Mermaid 架构/安装状态机/本地仓库/流水线图与截图墙、设计对标说明；新增 [LOCAL-REPO.md](LOCAL-REPO.md)。
+- 137 项自动化测试全部通过（在资产摘要范围边界、离线判定阈值、机群汇总往返、时序留存与剪枝、鉴权闸门之外，新增本地仓库的落盘与清单结构、缓存命中不发请求、失败记录与重试累计、status 按磁盘重算、sha256 识破篡改，以及真 HTTP 端到端镜像与全版本落盘用例），类型检查干净。
 
 ## 0.1.0 - 2026-10-06
 

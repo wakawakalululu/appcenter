@@ -8,11 +8,72 @@
 
 ![应用中心首页](docs/assets/screenshots/home.png)
 
+<table>
+  <tr>
+    <td><img src="docs/assets/screenshots/categories.png" alt="分类视图"/></td>
+    <td><img src="docs/assets/screenshots/settings.png" alt="设置与本地仓库"/></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/screenshots/click-app-main.png" alt="应用详情抽屉"/></td>
+    <td><img src="docs/assets/screenshots/desktop-window.png" alt="桌面应用窗口"/></td>
+  </tr>
+</table>
+
 覆盖软件分发全链路：目录与分类检索、本机已装清单、卸载残留扫描与清理、断点续传下载与校验、
 多类型安装执行计划、批量安装与升级、申请审批、皮肤与主题、客户端自升级、系统托盘与多窗口。
 
 > 本项目为独立实现的开源软件。终端管控类能力（行为采集、Web 中间人、锁屏、远程桌面、
 > 驱动级进程拦截、静默保活）不在设计范围内。
+
+## 架构总览
+
+```mermaid
+flowchart TB
+  subgraph HOST["UI 宿主（可替换）"]
+    WEB["Web UI<br/>packages/app/web"]
+    TRAY["WinForms 托盘<br/>tray.ts"]
+    TAURI["Tauri 壳<br/>src-tauri"]
+  end
+
+  subgraph CORE["@appcenter/core 领域引擎（无框架依赖）"]
+    F["facade.ts 统一入口"]
+    CAT["catalog 目录/搜索/评分"]
+    INV["inventory 注册表清单"]
+    LEFT["leftover 残留扫描"]
+    DL["download 断点续传"]
+    RUN["runner 安装执行计划"]
+    ORCH["orchestrator 安装状态机"]
+    UP["upgrader / selfupdate"]
+    LR["localrepo 本地仓库镜像"]
+  end
+
+  subgraph SRV["packages/server"]
+    API["HTTP API<br/>目录/评分/审批/审计"]
+    DB[("SQLite")]
+    PKG["/dl 安装包分发<br/>Range 支持"]
+  end
+
+  WEB -- "POST /rpc · GET /events (SSE)" --> F
+  TRAY -- "ui.tray / ui.trayAction" --> F
+  TAURI -- "同一 facade" --> F
+  F --> CAT & INV & LEFT & DL & RUN & ORCH & UP & LR
+  ORCH --> DL --> PKG
+  LR --> DL
+  API --> DB
+  CAT -- "拉取目录" --> API
+  PKG --> ROOT["安装包文件目录<br/>packageRoot"]
+```
+
+一条安装链路的状态机（UI 通过 SSE 实时收到每次迁移）：
+
+```mermaid
+flowchart LR
+  Q[queued] --> D[downloading] --> V[verifying] --> I[installing]
+  I --> S[succeeded]
+  I --> R[needs_reboot]
+  I --> X[failed]
+  D -.需审批.-> A[awaiting_approval] -.凭证.-> D
+```
 
 ## 目录结构
 
@@ -102,7 +163,7 @@ ADMIN_TOKEN=xxx DB_FILE=/var/lib/appcenter/catalog.db PACKAGE_ROOT=/srv/packages
 已完成：目录 / 分类 / 搜索 / 评分 / 清单（含缓存与增量刷新）/ 残留扫描 / 清理计划与备份撤销 /
 断点续传下载 / 多类型安装执行计划 / 装后版本回读 / 编排与批量队列 / 升级计划 / 自升级 /
 审批与通知回路 / 皮肤 / 窗口 / 托盘 / 开机自启开关 / 真机安装包发现与本地仓库镜像 /
-服务端（鉴权、审计、部门目录、捆绑包、运营位、机群资产心跳与离线判定）/ CLI 与桌面 UI，共 127 项测试。
+服务端（鉴权、审计、部门目录、捆绑包、运营位、机群资产心跳与离线判定）/ CLI 与桌面 UI，共 137 项测试。
 
 目录应用支持 `installMode: silent | manual`——手动安装弹真实安装向导（执行计划剥掉静默参数）。
 
@@ -116,26 +177,100 @@ ADMIN_TOKEN=xxx DB_FILE=/var/lib/appcenter/catalog.db PACKAGE_ROOT=/srv/packages
 - 真实升级链路与真实安装包的端到端演练
 - 开机自启与托盘图标在真实桌面会话下的验收
 
+## 本地应用包仓库（离线镜像）
+
+把目录里的安装包**持久化到本地并生成自描述清单**——与安装编排器「下载即用完即删」相对，
+这是一份可审计、可离线复用的镜像（详细设计见 [LOCAL-REPO.md](LOCAL-REPO.md)）：
+
+```bash
+# CLI：发现目录 → 逐个下载（sha256 校验后落地）→ 写 manifest.json
+APPCENTER_API=http://127.0.0.1:7991 node --experimental-transform-types packages/cli/src/main.ts repo-sync
+APPCENTER_API=http://127.0.0.1:7991 node --experimental-transform-types packages/cli/src/main.ts repo-status
+
+# 界面：设置 → 本地应用包仓库 → 同步最新版 / 同步全部版本
+# RPC：repo.sync {allVersions} / repo.status
+```
+
+```mermaid
+flowchart LR
+  A["catalog（目录）"] -->|"每个版本<br/>url + sha256 + size"| B["LocalRepo.sync"]
+  B -->|"Range 续传下载"| C["sha256 校验"]
+  C -->|"通过"| D["<root>/<appId>/<version>.exe"]
+  C -->|"失败"| E["记入 failed<br/>下次同步自动重试"]
+  D --> F["manifest.json<br/>= 落盘索引 + 目录快照"]
+  B -->|"文件已存在且校验通过"| G["cached 跳过"]
+```
+
+manifest.json 同时携带**目录快照**（全部应用 + 分类），拿到目录即拿到全部语义：
+
+```json
+{
+  "formatVersion": 1,
+  "catalog": { "apps": ["…21 个应用摘要"], "categories": ["…分类树"] },
+  "items": [
+    { "appId": "wps-office", "version": "12.1.0", "relativePath": "wps-office/12.1.0.msi",
+      "sizeBytes": 481280, "sha256": "…", "status": "saved", "attempts": 1 }
+  ]
+}
+```
+
+## 构建流水线
+
+CI（`.github/workflows/ci.yml`）分两个 job，全部跑在 `windows-latest`——注册表清单、
+GDI+ 图标提取、WinForms 托盘都是 Windows 专属能力，ubuntu 上跑不全：
+
+```mermaid
+flowchart LR
+  A["push / PR<br/>（同分支并发取消）"] --> B["verify<br/>npm ci → typecheck → test → smoke"]
+  B --> C["demo<br/>起目录 API + UI 演示环境"]
+  C --> D["ui-shot<br/>无头浏览器逐视图截图"]
+  D --> E["artifact<br/>ui-screenshots"]
+```
+
+| 阶段 | 命令 | 内容 |
+| --- | --- | --- |
+| 静态检查 | `npm run typecheck` | `tsc -p tsconfig.json` 全仓严格检查 |
+| 单测/集成 | `npm test` | 137 项：引擎、服务端、bridge、图标、端到端 |
+| 冒烟 | `npm run smoke` | 真机注册表清单扫描 + CLI IPC 链路 |
+| 演示与截图 | `npm run demo` / `npm run shots` | 本地复现 CI 的截图产物（fresh 皮肤 1237×762） |
+
+两个 job 都有 `timeout-minutes` 上限，防止挂起的测试拖穿额度；截图产物随每次 CI 可下载比对。
+
 ## 文档与站点
 
 - 架构与 API 文档站（GitHub Pages）：<https://wakawakalululu.github.io/appcenter/>
 - 使用与协议说明（Wiki）：<https://github.com/wakawakalululu/appcenter/wiki>
 - 变更记录：[CHANGELOG.md](CHANGELOG.md)
 
-## 桌面 UI（packages/app）
+## 桌面端（packages/app）：从网页到桌面窗口
 
-`packages/app/web` 是本地 Web 客户端，`packages/app/src/bridge.ts` 把它接到引擎：只监听 127.0.0.1，
-`POST /rpc` 走与 CLI 完全相同的 `dispatch` 方法表，`GET /events` 用 SSE 推送任务与托盘状态。
+界面本体是本地 Web 技术（`packages/app/web`，`bridge.ts` 只监听 127.0.0.1，`POST /rpc` 与 CLI 同一
+`dispatch` 方法表，`GET /events` 用 SSE 推任务与托盘状态）——但这**不等于它是网页**：
+同一份界面按三种形态交付，网页只是其中最内层的渲染层。
+
+```mermaid
+flowchart LR
+  A["第 1 层：浏览器开发模式<br/>npm run ui"] -.同一份 UI.-> B["第 2 层：桌面应用窗口（默认）<br/>npm run desktop"]
+  B -.同一份 UI.-> C["第 3 层：Tauri 打包<br/>npm run tauri build"]
+  B --> D["独立窗口 · 任务栏图标<br/>favicon 品牌 · OS 标题条"]
+  C --> E["自有 exe/安装包<br/>无边框自绘标题条"]
+```
+
+**第 2 层（本轮落地）**：`npm run desktop` 一条命令拉起「目录服务 + 引擎 + 桥」并打开
+**独立桌面应用窗口**（Edge/Chrome `--app` 模式）——无标签页、无地址栏、任务栏独立图标、
+品牌 favicon 作窗口图标，窗口初始几何取工作区的 60.4% × 66.1%（最小 900×600，居中）。
+`?shell=app` 会让界面隐藏自绘的最小化/最大化/关闭按钮（OS 标题条接管，不出现双份控制）。
+窗口关闭即整场退出；托盘常驻走 `tray.ts`（见下节）。
 
 ```bash
-# 一条命令拉起目录服务 + UI（演示数据）
-CATALOG_PORT=7991 UI_PORT=8080 node --experimental-transform-types scripts/ui-demo.mts
-# 打开 http://127.0.0.1:8080
-
-# 或者分开跑
-npm run server -- --seed
-npm run ui
+npm run desktop        # 桌面应用窗口 + 引擎（默认 7991 目录端口，UI 端口自动分配）
+npm run ui             # 开发模式：纯浏览器标签页
 ```
+
+**第 3 层（就绪待编译）**：`packages/app/src-tauri/` 是 Tauri v2 骨架，打包出真正自有的
+exe/安装包与无边框自绘标题条——需要 Rust + MSVC + WebView2 工具链，本仓库尚未编译验证
+（`npm run icons` 后 `npm run tauri build`）。之所以先用 `--app` 窗口过渡：它零工具链依赖
+（Edge 恒在）、立即可用，且 UI 代码三层完全同源，切到 Tauri 只是换壳。
 
 界面包含：推荐、分类（含子分类聚合）、搜索、已安装（读本机注册表）、升级与批量升级、
 我的申请（提交/取凭证/重试安装）、卸载与残留清理（分段耗时、风险勾选、计划与试运行、CONFIRM 确认串）、
@@ -168,6 +303,18 @@ curl -s -X POST http://127.0.0.1:8080/rpc -H "content-type: application/json" \
 # 真机自检：自建 HKCU 测试键 → 扫描 → 备份 → 删除 → 还原 → 清理，全程自动
 node --experimental-transform-types scripts/verify-cleanup.mts
 ```
+
+## 设计对标
+
+界面与工程文档不是闭门造车，参照了这些专业项目的公开做法（只借鉴结构与交互模式，不复制素材）：
+
+| 对标 | 借鉴点 | 落在哪 |
+| --- | --- | --- |
+| **VS Code** 的 README/文档结构 | 徽章 → 一句话定位 → 截图 → 架构图 → 快速开始 → 设计原则的叙述顺序 | 本 README 章节编排 |
+| **Microsoft Store / 应用商店类客户端** | 首页三层结构（运营位 → 必备应用 → 分类聚合卡）、按钮三态语义（打开/一键安装/手动安装） | 首页布局与 [UI-ROUND3.md](UI-ROUND3.md) |
+| **Ant Design** 的 token 化设计 | 皮肤=token 覆盖表、间距/圆角/字号全部走 CSS 变量，缺省回落并被显式记录 | `theme/skin.ts`、`app.css` |
+| **Tauri** 的轻量分发思路 | 不内置 Electron，Web UI 可被 WebView/Tauri/WinForms 任一宿主包裹 | `packages/app` 与 src-tauri 骨架 |
+| **Homebrew / winget** 的清单思想 | 安装包 + sha256 + 元数据的自描述 manifest，离线可审计 | `localrepo/`、[LOCAL-REPO.md](LOCAL-REPO.md) |
 
 ## 许可
 

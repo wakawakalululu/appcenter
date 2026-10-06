@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -78,14 +79,36 @@ export class RuntimeConfigStore {
     return this.loading;
   }
 
-  /** 先写临时文件再改名，避免半截文件被另一个进程读到。 */
+  /**
+   * 先写临时文件再改名，避免半截文件被另一个进程读到。
+   * 临时名要带 pid 与随机后缀：固定 `<file>.tmp` 在 CLI 与 UI 宿主共用同一份运行配置时会互相踩文件，
+   * 失败那次还会把脏 .tmp 留给下一轮 rename 成正式配置。
+   * Windows 上 rename 覆盖一个句柄仍被别的进程持有的目标会 EPERM（不像 POSIX 是原子替换），
+   * 所以改名要有界重试——与安装器换版时处理被占用映像的办法一致。
+   */
   async save(patch: Partial<RuntimeConfig>): Promise<{ config: RuntimeConfig; issues: RuntimeConfigIssue[] }> {
     const current = await this.load();
     const merged = sanitize({ ...current, ...patch });
     await mkdir(path.dirname(this.file), { recursive: true });
-    const temp = this.file + ".tmp";
-    await writeFile(temp, JSON.stringify(merged.config, null, 2), "utf8");
-    await rename(temp, this.file);
+    const temp = this.file + "." + process.pid + "." + randomBytes(4).toString("hex") + ".tmp";
+    try {
+      await writeFile(temp, JSON.stringify(merged.config, null, 2), "utf8");
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          await rename(temp, this.file);
+          lastError = undefined;
+          break;
+        } catch (err) {
+          lastError = err;
+          await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        }
+      }
+      if (lastError) throw lastError;
+    } catch (err) {
+      await rm(temp, { force: true }).catch(() => undefined);
+      throw err;
+    }
     this.cached = merged.config;
     this.loading = null;
     return merged;

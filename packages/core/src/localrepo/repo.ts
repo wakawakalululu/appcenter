@@ -68,6 +68,8 @@ export interface LocalRepoOptions {
   /** cached 判定强度：size 只对文件大小，sha256 逐字节校验（大文件慎用）。 */
   verify?: "size" | "sha256";
   concurrency?: number;
+  /** 目录里的 downloadUrl 常是相对路径（/dl/...），这里补全成绝对 URL。 */
+  urlBase?: string;
 }
 
 export interface RepoSyncInput {
@@ -132,6 +134,10 @@ export class LocalRepo {
       for (const version of versions) {
         const base = version.downloadUrl.split("?")[0] ?? version.downloadUrl;
         const fileName = base.split("/").pop() ?? "package.bin";
+        const url =
+          this.deps.urlBase && version.downloadUrl.startsWith("/")
+            ? this.deps.urlBase.replace(/\/+$/, "") + version.downloadUrl
+            : version.downloadUrl;
         items.push({
           appId: app.id,
           name: app.name,
@@ -143,7 +149,7 @@ export class LocalRepo {
           relativePath: [safeName(app.id), version.version + extensionOf(version.downloadUrl)].join("/"),
           sizeBytes: version.sizeBytes,
           sha256: version.sha256,
-          url: version.downloadUrl,
+          url,
           status: "pending",
           attempts: 0,
         });

@@ -58,13 +58,19 @@ test("bridge serves the UI and routes RPC to the facade", async () => {
   assert.match(genIcon.headers.get("content-type") ?? "", /image\/svg/);
   assert.match(await genIcon.text(), /<svg/);
   assert.equal((await fetch(base + "/icons/gen/bad%2Fseed.svg")).status, 404, "seed 不允许带路径字符");
+  const favicon = await fetch(base + "/favicon.svg");
+  assert.equal(favicon.status, 200);
+  assert.match(await favicon.text(), /<svg/, "独立应用窗口用品牌 favicon 当窗口/任务栏图标");
 
   const call = async (method: string, params?: Record<string, unknown>) => {
     const response = await fetch(base + "/rpc", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ method, params }) });
     return { status: response.status, payload: await response.json() as { ok: boolean; result?: unknown; error?: string } };
   };
 
-  assert.equal((await call("catalog.refresh")).payload.result, 10);
+  // 演示目录规模随 seedDemo 演进，断言按实际库内容算，不写死数量。
+  const seededApps = db.summaries().length;
+  const refreshed = (await call("catalog.refresh")).payload.result;
+  assert.equal(refreshed, seededApps);
   const search = await call("catalog.search", { text: "wps" });
   const first = (search.payload.result as { app: { name: string; ratings?: { count: number } } }[])[0];
   assert.equal(first?.app.name, "WPS Office");

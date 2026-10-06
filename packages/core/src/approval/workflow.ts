@@ -47,6 +47,9 @@ function payloadOf(grant: Omit<Grant, "signature">): string {
 export class ApprovalWorkflow {
   private readonly requests = new Map<string, ApprovalRequest>();
   private readonly secret: string;
+  /** requestId → 已签发的 grant token：吊销要能落到具体凭证上，而不是只改请求状态。 */
+  private readonly issuedTokens: Map<string, string> = new Map();
+  private readonly revokedTokens: Set<string> = new Set();
 
   constructor(secret = "") {
     this.secret = secret;
@@ -108,12 +111,17 @@ export class ApprovalWorkflow {
       expiresAt: request.expiresAt ?? new Date(now.getTime() + 86400_000).toISOString(),
     };
     request.status = "granted";
-    return { ...unsigned, signature: this.sign(unsigned) };
+    const grant = { ...unsigned, signature: this.sign(unsigned) };
+    this.issuedTokens.set(request.id, grant.token);
+    return grant;
   }
 
   revoke(requestId: string): void {
     const request = this.requests.get(requestId);
-    if (request) request.status = "revoked";
+    if (!request) return;
+    request.status = "revoked";
+    const token = this.issuedTokens.get(requestId);
+    if (token) this.revokedTokens.add(token);
   }
 
   revokeFor(context: GrantContext): number {
@@ -121,6 +129,8 @@ export class ApprovalWorkflow {
     for (const request of this.requests.values()) {
       if (request.appId === context.appId && request.applicant === context.userId) {
         request.status = "revoked";
+        const token = this.issuedTokens.get(request.id);
+        if (token) this.revokedTokens.add(token);
         count++;
       }
     }
@@ -144,7 +154,14 @@ export class ApprovalWorkflow {
     }
     if (grant.appId !== context.appId) return { ok: false, reason: "app-mismatch" };
     if (grant.userId !== context.userId) return { ok: false, reason: "user-mismatch" };
-    if (new Date(grant.expiresAt).getTime() <= now.getTime()) return { ok: false, reason: "expired" };
+    // 时间戳解析不了就必须当作「已失效」：旧写法 `new Date("乱码").getTime() <= now` 拿到 NaN，
+    // 比较恒为 false，于是这张凭证永远不会过期。
+    const issuedAt = Date.parse(grant.issuedAt);
+    const expiresAt = Date.parse(grant.expiresAt);
+    if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt)) return { ok: false, reason: "timestamp-unparseable" };
+    if (expiresAt <= issuedAt) return { ok: false, reason: "expiry-not-after-issue" };
+    if (expiresAt <= now.getTime()) return { ok: false, reason: "expired" };
+    if (this.revokedTokens.has(grant.token)) return { ok: false, reason: "revoked" };
     const related = [...this.requests.values()].filter((r) => r.appId === context.appId && r.applicant === context.userId);
     if (related.length > 0 && related.every((r) => r.status === "revoked")) return { ok: false, reason: "revoked" };
     return { ok: true, reason: "granted" };

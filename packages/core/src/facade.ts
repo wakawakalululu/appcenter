@@ -91,6 +91,17 @@ export class MemoryGrantStore {
   clear(appId: string, userId: string): void {
     this.grants.delete(this.key(appId, userId));
   }
+
+  /** 当前用户持有且未过期的授权 appId 集合，供 catalog 视图翻转「需审批」状态。 */
+  grantedAppIds(userId: string, now: Date = new Date()): Set<string> {
+    const out = new Set<string>();
+    for (const grant of this.grants.values()) {
+      if (grant.userId === userId && new Date(grant.expiresAt).getTime() > now.getTime()) {
+        out.add(grant.appId);
+      }
+    }
+    return out;
+  }
 }
 
 import type { Grant } from "./approval/workflow.ts";
@@ -605,6 +616,7 @@ export class AppCenterFacade {
     const versions: Record<string, string[]> = {};
     for (const detail of this.catalogCache) versions[detail.id] = detail.versions.map((v) => v.version);
     const installed = await this.installed();
+    const granted = this.grants.grantedAppIds(this.config.userId);
     const entries = buildCatalogEntries({
       apps: this.summaries(),
       installed,
@@ -612,6 +624,7 @@ export class AppCenterFacade {
       categories: this.categoryCache,
       latestVersions: versions,
       icons: (appId) => this.catalogCache.find((a) => a.id === appId)?.iconUrl ?? null,
+      granted,
     });
     for (const entry of entries) {
       const match = matchInstalled(entry.app, installed);
@@ -694,6 +707,7 @@ export class AppCenterFacade {
       downloader: this.downloader,
       root: options.dir ?? path.join(this.config.dataDir, "local-repo"),
       verify: options.verify,
+      urlBase: this.config.serverUrl,
     });
     return repo.sync({ apps: this.catalogCache, categories: this.categoryCache, allVersions: options.allVersions });
   }

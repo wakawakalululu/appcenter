@@ -590,6 +590,44 @@ async function loadSettings() {
     el("btn-selfupdate-apply").disabled = false;
     el("selfupdate-meta").textContent = "已暂存 v" + pending.version + "（" + new Date(pending.stagedAt).toLocaleString() + "），点立即应用即可换版";
   }
+  await paintRepo();
+}
+
+const REPO_STATUS_LABEL = { saved: "已保存", failed: "失败", pending: "待取" };
+
+async function paintRepo() {
+  try {
+    const status = await rpc("repo.status");
+    if (!status.manifestExists) {
+      el("repo-meta").textContent = "还没有清单，点「同步最新版」开始把安装包保存到本地。";
+      el("repo-items").innerHTML = "";
+      return;
+    }
+    el("repo-meta").textContent =
+      status.root + " · 已保存 " + String(status.saved) + " / 失败 " + String(status.failed) + " / 待取 " + String(status.pending) +
+      " · 合计 " + (status.totalBytes / 1048576).toFixed(1) + " MB";
+    el("repo-items").innerHTML = status.items
+      .slice(0, 10)
+      .map(
+        (item) =>
+          "<li>[" + safe(REPO_STATUS_LABEL[item.status] || item.status) + "] " + safe(item.name) + " v" + safe(item.version) +
+          " · " + (item.sizeBytes / 1024).toFixed(0) + " KB" + (item.error ? " · " + safe(item.error) : "") + " → " + safe(item.relativePath) + "</li>",
+      )
+      .join("") + (status.items.length > 10 ? "<li>… 其余 " + String(status.items.length - 10) + " 项见 manifest.json</li>" : "");
+  } catch (err) {
+    el("repo-meta").textContent = "仓库状态不可用：" + String((err && err.message) || err);
+  }
+}
+
+async function runRepoSync(allVersions) {
+  el("repo-meta").textContent = allVersions ? "正在同步全部历史版本……" : "正在同步最新版本……";
+  try {
+    const report = await rpc("repo.sync", { allVersions });
+    toast("本地仓库同步完成：新存 " + String(report.saved.length) + "，已有 " + String(report.cached.length) + "，失败 " + String(report.failed.length));
+  } catch (err) {
+    fail(err);
+  }
+  await paintRepo();
 }
 
 function paintSchedule(scheduler) {
@@ -678,7 +716,7 @@ document.addEventListener("click", async (event) => {
   // 菜单外任意点击都先收起，菜单项本身由 trigger 分支处理。
   if (!event.target.closest || !event.target.closest(".menu-host")) closeMenu();
   // 只有列在这里的选择器会进分发表；新增按钮必须同步加进来，否则点击会被静默丢弃。
-  const trigger = event.target.closest("[data-action],[data-detail],[data-category],[data-residue],[data-uninstall],[data-grant],[data-rate],[data-close-window],[data-versions],[data-note-done],[data-bundle],[data-view],#bundle-close,#btn-bulk,#btn-upgrade-all,#btn-approval-submit,#btn-residue,#btn-plan,#btn-cleanup-dry,#btn-cleanup-run,#btn-cleanup-restore,#detail-close,#downloads-close,#btn-back,#btn-menu,#btn-downloads,#menu-upgrade-all,#menu-downloads,#btn-min,#btn-max,#btn-close,#btn-selfupdate,#btn-selfupdate-stage,#btn-selfupdate-apply,#btn-save-runtime,#btn-start-checks,#btn-stop-checks");
+  const trigger = event.target.closest("[data-action],[data-detail],[data-category],[data-residue],[data-uninstall],[data-grant],[data-rate],[data-close-window],[data-versions],[data-note-done],[data-bundle],[data-view],#bundle-close,#btn-bulk,#btn-upgrade-all,#btn-approval-submit,#btn-residue,#btn-plan,#btn-cleanup-dry,#btn-cleanup-run,#btn-cleanup-restore,#detail-close,#downloads-close,#btn-back,#btn-menu,#btn-downloads,#menu-upgrade-all,#menu-downloads,#btn-min,#btn-max,#btn-close,#btn-selfupdate,#btn-selfupdate-stage,#btn-selfupdate-apply,#btn-save-runtime,#btn-start-checks,#btn-stop-checks,#btn-repo-sync,#btn-repo-sync-all,#btn-repo-status");
   if (!trigger) return;
   const id = trigger.dataset.id;
   try {
@@ -770,6 +808,9 @@ document.addEventListener("click", async (event) => {
     }
     if (trigger.id === "btn-start-checks") return paintSchedule(await rpc("runtime.startChecks"));
     if (trigger.id === "btn-stop-checks") return paintSchedule(await rpc("runtime.stopChecks"));
+    if (trigger.id === "btn-repo-sync") return runRepoSync(false);
+    if (trigger.id === "btn-repo-sync-all") return runRepoSync(true);
+    if (trigger.id === "btn-repo-status") return paintRepo();
     if (trigger.id === "btn-selfupdate") {
       const check = await rpc("selfupdate.check");
       state.selfUpdate = check.manifest;
@@ -839,6 +880,17 @@ el("skin").addEventListener("change", async (event) => {
   }
 });
 
+/** 首屏骨架：banner 与分类卡先给 shimmer 占位，数据一到被真实渲染替换。 */
+function paintSkeletons() {
+  el("banners").innerHTML = Array.from({ length: 2 }, () => '<div class="banner skeleton"><div class="sk-line lg"></div><div class="sk-line md"></div></div>').join("");
+  el("sections").innerHTML = Array.from(
+    { length: 2 },
+    () =>
+      '<section class="section-card skeleton"><div class="section-aside"><div class="sk-line lg"></div><div class="sk-line sm"></div></div>' +
+      '<div class="section-body"><div class="sk-line md"></div><div class="sk-line md"></div><div class="sk-line md"></div></div></section>',
+  ).join("");
+}
+
 (async function boot() {
   connectEvents();
   // 图标 404 时摘掉 img，露出底层字母占位；error 不冒泡，只能在捕获阶段接。
@@ -856,7 +908,10 @@ el("skin").addEventListener("change", async (event) => {
     await hydrate(view);
   });
   try {
+    // 桌面壳（Edge/Chrome --app 独立窗口）注入 shell=app：窗口控制交给 OS 标题条，隐藏自绘按钮避免双份。
+    if (new URLSearchParams(location.search).get("shell") === "app") document.body.classList.add("shell-app");
     applySkin(await rpc("ui.skin"));
+    paintSkeletons();
     await refreshHome();
     await loadView();
     const initial = viewFromHash();

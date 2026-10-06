@@ -185,6 +185,15 @@ button.danger { background: var(--danger); color: #fff; padding: var(--s2) var(-
 .empty-state { display: grid; justify-items: center; align-content: center; gap: var(--s2); padding: var(--s6) var(--s4); text-align: center; color: var(--text-secondary); }
 .empty-state .empty-glyph { display: grid; place-items: center; width: 88px; height: 88px; border-radius: 50%; background: var(--primary-soft); color: var(--primary); font-size: 34px; }
 .empty-state p { margin: 0; color: var(--text-muted); font-size: 12px; }
+/* 首屏骨架屏：数据到达前先给结构占位，避免整块白屏（对标主流商店客户端的加载态）。 */
+.skeleton { position: relative; overflow: hidden; }
+.sk-line { height: 14px; border-radius: 999px; width: 60%; background: color-mix(in srgb, var(--text-muted) 22%, transparent); margin-block: var(--s2); }
+.sk-line.lg { height: 30px; width: 45%; }
+.sk-line.md { width: 85%; }
+.sk-line.sm { width: 40%; }
+.skeleton::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--surface) 72%, transparent), transparent); animation: ac-shimmer 1.4s infinite; }
+@keyframes ac-shimmer { to { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .skeleton::after { animation: none; } }
 .section-card { background: var(--surface); border: 1px solid var(--divider); border-radius: var(--radius-lg); display: grid; grid-template-columns: 148px minmax(0, 1fr); overflow: hidden; box-shadow: var(--shadow-card); }
 /* 左侧面板：主色加深的渐变底 + 白色大字 + 白描边胶囊按钮 + 底部装饰环。 */
 .section-aside { position: relative; overflow: hidden; background: linear-gradient(160deg, color-mix(in srgb, var(--primary) 58%, var(--section-from)), color-mix(in srgb, var(--primary) 22%, var(--section-to))); padding: var(--s4); display: flex; flex-direction: column; gap: var(--s3); justify-content: space-between; }
@@ -284,6 +293,11 @@ input[type="search"], input[type="number"], select, .form-row select { padding: 
   .essential { flex-wrap: wrap; }
   .content { padding: var(--s4); }
 }
+
+/* 桌面壳模式（Edge/Chrome --app 独立窗口）：OS 标题条拥有最小化/最大化/关闭，隐藏自绘按钮避免双份。 */
+body.shell-app #btn-min,
+body.shell-app #btn-max,
+body.shell-app #btn-close { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }

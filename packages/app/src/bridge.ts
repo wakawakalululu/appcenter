@@ -73,6 +73,18 @@ function escapeXml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[c]!);
 }
 
+/** 应用中心的品牌图标：云 + 购物袋，自绘原创，跟随皮肤主色交给 CSS 不适合 SVG，这里用品牌绿。 */
+function faviconSvg(): string {
+  return (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+    '<rect width="64" height="64" rx="14" fill="#27A46A"/>' +
+    '<path d="M17 30a9 9 0 0 1 1.6-5.1A11.5 11.5 0 0 1 40.5 22 8.3 8.3 0 0 1 44.5 30H17Z" fill="#ffffff" opacity="0.92"/>' +
+    '<path d="M19 34h26l-2.1 10.6a3.2 3.2 0 0 1-3.2 2.6H24.3a3.2 3.2 0 0 1-3.2-2.6L19 34Z" fill="#ffffff"/>' +
+    '<path d="M25.6 34v-2.3a4.4 4.4 0 0 1 8.8 0V34" stroke="#27A46A" stroke-width="2.4" stroke-linecap="round" fill="none"/>' +
+    "</svg>"
+  );
+}
+
 export function createBridge(options: BridgeOptions): Server {
   const { facade, webRoot } = options;
   const clients = new Set<ServerResponse>();
@@ -101,6 +113,10 @@ export function createBridge(options: BridgeOptions): Server {
         const call = await readJson<RpcCall>(req);
         const result = await dispatch(facade, call.method, call.params ?? {});
         return send(res, result.ok ? 200 : 400, result);
+      }
+      if (url.pathname === "/favicon.svg") {
+        // 独立应用窗口（--app 模式）拿站点图标当窗口/任务栏图标。
+        return send(res, 200, faviconSvg(), "image/svg+xml; charset=utf-8");
       }
       if (url.pathname.startsWith("/icons/gen/")) {
         // 生成式演示图标：真机装上之前，用 seed 决定的色相画一块首字母圆角渐变。

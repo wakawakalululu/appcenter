@@ -139,7 +139,7 @@ export class InstallOrchestrator {
     this.jobs.set(id, job);
     this.queue.push(id);
     this.transition(job, "queued");
-    void this.drain();
+    void this.drain().catch(() => undefined);
     return job;
   }
 
@@ -165,14 +165,30 @@ export class InstallOrchestrator {
       const job = this.jobs.get(id);
       if (!job) continue;
       this.running++;
-      void this.execute(job).finally(() => {
-        this.running--;
-        void this.drain();
-      });
+      void this.execute(job)
+        .catch(() => undefined)
+        .finally(() => {
+          this.running--;
+          void this.drain().catch(() => undefined);
+        });
     }
   }
 
+  /**
+   * 每一步都必须在同一个 try 里收口。旧写法把 `catalog.detail` / `pickVersion` /
+   * `resolvePackageDir` / `inventory.installed` / `buildPlan` 都留在 try 之外，
+   * 一旦它们抛出，任务就永远停在 queued/downloading（非终态），
+   * 而调用侧是 `void this.execute(job)`——未处理的拒绝在本机 Node 24 上直接把进程打死（真退出码 1）。
+   */
   private async execute(job: InstallJob): Promise<void> {
+    try {
+      await this.runSteps(job);
+    } catch (err) {
+      this.transition(job, "failed", { error: errorMessage(err) });
+    }
+  }
+
+  private async runSteps(job: InstallJob): Promise<void> {
     const detail = await this.deps.catalog.detail(job.appId);
     if (!detail) {
       this.transition(job, "failed", { error: "app disappeared from catalog" });
@@ -230,8 +246,9 @@ export class InstallOrchestrator {
         this.transition(job, "failed", { error: "installer exit " + String(result.exitCode), execution: result });
         return;
       }
-      const installedVersion = await this.readInstalledVersion(detail.name, job.version);
-      await this.cleanupPackage(downloaded);
+      // 安装到此已经成功：回读版本或清理安装包出问题，都不能把它反过来改判成 failed。
+      const installedVersion = await this.readInstalledVersion(detail.name, job.version).catch(() => undefined);
+      await this.cleanupPackage(downloaded).catch(() => undefined);
       this.transition(job, verdict.requiresReboot ? "needs_reboot" : "succeeded", { execution: result, installedVersion });
     } catch (err) {
       await this.cleanupPackage(downloaded).catch(() => undefined);

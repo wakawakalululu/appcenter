@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { compare } from "../util/semver.ts";
-import { applyUpdate, pruneBackups, type SwapOutcome } from "./updater.ts";
+import { applyUpdate, fileSha256, pruneBackups, type SwapOutcome } from "./updater.ts";
 import type { DownloadPort } from "../orchestrator/installer.ts";
 
 export interface SelfUpdateManifest {
@@ -28,6 +28,12 @@ export interface HealthMarker {
   expectedVersion: string;
   startedAt: string;
   healthy: boolean;
+  /**
+   * 写标记时在用的可执行文件摘要：recover() 用它判断「这次到底换没换成」。
+   * 没有这个字段（旧标记）时不做回滚，只丢弃 pending——因为光有 pending 并不能证明
+   * 二进制被动过，凭它去恢复一份旧备份就是一次静默降级。
+   */
+  preSwapSha256?: string | null;
 }
 
 export interface SelfUpdaterDeps {
@@ -119,30 +125,50 @@ export class SelfUpdater {
   }
 
   /**
-   * 换版：先写健康标记（崩溃也能被 recover 发现），再走 applyUpdate 的
+   * 换版：先核对调用方传来的暂存信息与磁盘上的 pending 标记一致（否则等于让调用方
+   * 指定任意文件覆盖主程序），再写健康标记，最后走 applyUpdate 的
    * 校验→备份→覆盖→健康检查→失败回滚。
+   * 没给 healthCheck 时不再是「默认健康」，而是当场复核换进去的内容确实是暂存包。
    */
   async apply(staged: StagedUpdate, healthCheck?: () => Promise<boolean>): Promise<SwapOutcome> {
+    const pending = await this.readPending();
+    if (!pending) return this.failed("no pending update marker; run stage() first");
+    if (
+      pending.version !== staged.version ||
+      pending.sha256.toLowerCase() !== staged.sha256.toLowerCase() ||
+      path.resolve(pending.packagePath) !== path.resolve(staged.packagePath)
+    ) {
+      return this.failed("staged update does not match the pending marker");
+    }
+
+    const targetPath = path.join(this.deps.appDir, this.exeName);
     const marker: HealthMarker = {
       expectedVersion: staged.version,
       startedAt: (this.deps.now?.() ?? new Date()).toISOString(),
       healthy: false,
+      preSwapSha256: await fileSha256(targetPath),
     };
     await fs.mkdir(this.deps.stagingDir, { recursive: true });
     await fs.writeFile(this.healthFile, JSON.stringify(marker, null, 2), "utf8");
 
     const outcome = await applyUpdate({
       stagedPath: staged.packagePath,
-      targetPath: path.join(this.deps.appDir, this.exeName),
+      targetPath,
       backupDir: this.backupDir,
       expectedSha256: staged.sha256,
-      healthCheck,
+      healthCheck: healthCheck ?? (async () => (await fileSha256(targetPath)) === staged.sha256.toLowerCase()),
       now: this.deps.now,
     });
 
+    // pending 只在「确实换成了新版、等 commit() 确认」与「已回滚」之外都保持原样：
+    // 安全靠的是下面的换版证据判据，而不是靠偷偷删标记（删了会把调用方看到的待确认状态一并抹掉）。
     if (outcome.rolledBack) await fs.rm(this.pendingFile, { force: true });
     if (outcome.swapped) await pruneBackups(this.backupDir, 3);
     return outcome;
+  }
+
+  private failed(message: string): SwapOutcome {
+    return { swapped: false, rolledBack: false, backupPath: null, message };
   }
 
   /**
@@ -185,7 +211,7 @@ export class SelfUpdater {
     return exists ? legacy : null;
   }
 
-  /** 启动时调用：pending 仍存在且未 commit，说明新版没能正常拉起，回滚备份。 */
+  /** 启动时调用：pending 仍存在且未 commit，说明这次换版可能没被确认，按证据决定是否回滚备份。 */
   async recover(): Promise<{ rolledBack: boolean; version: string | null; message: string }> {
     const pending = await this.readPending();
     if (!pending) return { rolledBack: false, version: null, message: "no pending update" };
@@ -193,6 +219,18 @@ export class SelfUpdater {
     if (health?.healthy) {
       await fs.rm(this.pendingFile, { force: true });
       return { rolledBack: false, version: pending.version, message: "previous update already committed" };
+    }
+    // 光有 pending 不能证明二进制被动过：stage() 就会写 pending，用户不点「立即应用」也留着。
+    // 拿这份证据去恢复旧备份，实际就是一次静默降级。两种「无换版证据」的情形都只说明原因，
+    // 不删 pending——删除会连带抹掉调用方看到的待确认状态，安全靠的是这里不回滚，而不是靠删标记。
+    if (!health) {
+      return { rolledBack: false, version: pending.version, message: "staged update was never applied; nothing to roll back" };
+    }
+    if (health.preSwapSha256 !== undefined) {
+      const current = await fileSha256(path.join(this.deps.appDir, this.exeName));
+      if (current === health.preSwapSha256) {
+        return { rolledBack: false, version: pending.version, message: "binary unchanged since staging; nothing to roll back" };
+      }
     }
     const backup = await this.latestBackup();
     if (!backup) return { rolledBack: false, version: pending.version, message: "no backup available" };

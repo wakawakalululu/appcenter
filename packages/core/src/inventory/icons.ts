@@ -138,7 +138,9 @@ export async function extractIconsViaPowerShell(jobs: readonly IconJob[], cacheD
     child.stderr?.on("data", (chunk: Buffer) => (err += chunk.toString("utf8")));
     child.on("error", reject);
     child.on("close", (code) => {
-      void rm(manifestFile, { force: true });
+      // 旁路清理：Windows 上文件被占用会 EPERM/EBUSY 拒绝。未处理拒绝在本机等于进程崩溃，
+      // 不能让「临时清单没删掉」把主流程带崩。
+      void rm(manifestFile, { force: true }).catch(() => undefined);
       if (code === 0) resolve();
       else reject(new Error("icon extractor exit " + String(code) + (err ? ": " + err.slice(0, 200) : "")));
     });
@@ -150,7 +152,7 @@ export async function extractIconsViaPowerShell(jobs: readonly IconJob[], cacheD
     // PowerShell 的 UTF8 编码会带 BOM
     rows = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw) as typeof rows;
   } finally {
-    void rm(resultFile, { force: true });
+    void rm(resultFile, { force: true }).catch(() => undefined);
   }
   const byHash = new Map(rows.map((row) => [row.key, row]));
   return jobs.map((job) => {

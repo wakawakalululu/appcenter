@@ -165,14 +165,50 @@ function interactiveArgs(kind: InstallerKind, template: readonly string[]): stri
   return [...template];
 }
 
+/**
+ * 卸载串分词：引号内的内容整体算一段（内部空格保留）；没有引号时，只有「空白之后紧跟开关」
+ * 才视为参数边界。真机上大量卸载串是不带引号的 `C:\Program Files\App\unins000.exe /SILENT`，
+ * 旧写法先剥引号再按空白切，程序名会被折成 `C:\Program`。
+ */
+export function tokenizeCommandLine(raw: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let hasContent = false;
+  const push = (): void => {
+    if (hasContent) {
+      tokens.push(current);
+      current = "";
+      hasContent = false;
+    }
+  };
+  for (let index = 0; index < raw.length; index++) {
+    const char = raw[index]!;
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      hasContent = true;
+      continue;
+    }
+    if (!inQuotes && /\s/.test(char)) {
+      const rest = raw.slice(index + 1).replace(/^\s+/, "");
+      if (hasContent && /^[/-]/.test(rest)) push();
+      else if (hasContent) current += char;
+      continue;
+    }
+    current += char;
+    hasContent = true;
+  }
+  push();
+  return tokens;
+}
+
 /** 卸载串通常长这样：解析出可执行文件与参数，避免走 shell 拼接。 */
 export function parseUninstallCommand(raw: string, quiet: boolean): ExecutionRequest {
-  const stripped = raw.replace(/"/g, "").trim();
-  const segments = stripped.split(/\s+/).filter(Boolean);
+  const segments = tokenizeCommandLine(raw.trim());
   const head = segments[0] ?? "";
   const isMsi = /msiexec/i.test(head);
   if (isMsi) {
-    const product = (segments[segments.length - 1] ?? "").replace(/^\/[XY]/i, "");
+    const product = (segments[segments.length - 1] ?? "").replace(/^\/[XY]/i, "").replace(/^-([XY])/i, "/$1");
     return { program: "msiexec.exe", args: ["/x", product, "/qn", "/norestart"], requiresAdmin: true };
   }
   const args = segments.slice(1);

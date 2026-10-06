@@ -115,7 +115,7 @@ test("catalog honors department scoping", async () => {
     .prepare("INSERT INTO app_department_access (app_id, department_id) VALUES (?, ?)")
     .run("wps-office", "dept-eng");
   const all = await api<{ id: string }[]>("/api/apps");
-  assert.equal(all.body.length, 10, "默认不过滤");
+  assert.equal(all.body.length, 21, "默认不过滤（seedDemo 含 11 个补足分类密度的 extraApps）");
   const scoped = await api<{ id: string }[]>("/api/apps?department=dept-eng");
   assert.equal(scoped.body.length, 1);
   assert.equal(scoped.body[0]?.id, "wps-office");

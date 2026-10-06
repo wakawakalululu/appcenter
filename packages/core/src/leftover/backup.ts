@@ -73,16 +73,23 @@ export async function readBackupSet(dir: string): Promise<BackupSet | null> {
   }
 }
 
-/** 用备份把注册表项写回去，用于误删恢复与清理后的撤销。 */
-export async function restoreBackup(record: BackupRecord): Promise<{ ok: boolean; message: string }> {
-  const result = await runTool("reg.exe", ["import", record.file]);
-  if (result.code !== 0) return { ok: false, message: "reg import exit " + String(result.code) };
-  const content = await readFile(record.file).catch(() => null);
-  if (!content) return { ok: false, message: "backup file missing" };
-  if (record.sha256 && createHash("sha256").update(content).digest("hex") !== record.sha256) {
-    return { ok: false, message: "backup checksum mismatch, refusing to import" };
-  }
-  return { ok: true, message: "restored " + record.keyPath };
+/**
+ * 用备份把注册表项写回去，用于误删恢复与清理后的撤销。
+ * 先验摘要再 import：旧顺序是先导入、后校验，于是被篡改过的 .reg 已经写进注册表，
+ * 才回一句 "backup checksum mismatch, refusing to import"——那句拒绝是空的。
+ * importFile 可注入（与 restoreBackupSetWith 同一套写法），缺省才真走 reg.exe。
+ */
+export async function restoreBackup(
+  record: BackupRecord,
+  importFile: (file: string) => Promise<{ ok: boolean; message: string }> = async (file) => {
+    const result = await runTool("reg.exe", ["import", file]);
+    return { ok: result.code === 0, message: result.code === 0 ? "imported" : "reg import exit " + String(result.code) };
+  },
+): Promise<{ ok: boolean; message: string }> {
+  const check = await verifyBackupIntegrity(record);
+  if (!check.ok) return { ok: false, message: check.message + ", refusing to import" };
+  const outcome = await importFile(record.file);
+  return { ok: outcome.ok, message: outcome.ok ? "restored " + record.keyPath : outcome.message };
 }
 
 export async function restoreBackupSet(set: BackupSet): Promise<{ restored: number; failed: string[] }> {

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { dedupeInstalled, scanInstalledApps, toInstalledApp, type InstalledApp, type ScanOptions } from "./inventory.ts";
@@ -59,9 +60,28 @@ export class InstalledAppCache {
     const data: InventoryCacheData = { version: 1, updatedAt: new Date().toISOString(), apps, fingerprints };
     this.cache = data;
     await fs.mkdir(this.cacheDir, { recursive: true }).catch(() => undefined);
-    const tmp = this.file() + ".tmp";
-    await fs.writeFile(tmp, JSON.stringify(data), "utf8");
-    await fs.rename(tmp, this.file());
+    // 临时名必须唯一：CLI 与 UI 宿主可能共用同一个 dataDir 并发保存，
+    // 固定 `<file>.tmp` 会让两个写入者踩同一个文件，rename 之后一方把半截内容落成正式缓存。
+    // Windows 上 rename 覆盖被占用的目标会 EPERM，因此同样有界重试。
+    const tmp = this.file() + "." + process.pid + "." + randomBytes(4).toString("hex") + ".tmp";
+    try {
+      await fs.writeFile(tmp, JSON.stringify(data), "utf8");
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          await fs.rename(tmp, this.file());
+          lastError = undefined;
+          break;
+        } catch (err) {
+          lastError = err;
+          await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        }
+      }
+      if (lastError) throw lastError;
+    } catch (err) {
+      await fs.rm(tmp, { force: true }).catch(() => undefined);
+      throw err;
+    }
   }
 }
 

@@ -10,11 +10,26 @@ export interface TrayContext {
 
 const ACTIVE: InstallJob["state"][] = ["queued", "downloading", "verifying", "installing"];
 
+/** 所有任务里时间戳最晚的一次状态迁移；没有可用时间戳时返回 null。 */
+export function latestTransition(jobs: readonly InstallJob[]): { state: InstallJob["state"]; time: number } | null {
+  let best: { state: InstallJob["state"]; time: number } | null = null;
+  for (const job of jobs) {
+    for (const step of job.history ?? []) {
+      const time = Date.parse(step.at);
+      if (!Number.isFinite(time)) continue;
+      if (!best || time >= best.time) best = { state: step.state, time };
+    }
+  }
+  return best;
+}
+
 export function trayStatusFor(ctx: TrayContext): TrayStatus {
   if (ctx.jobs.some((j) => j.state === "needs_reboot")) return "needs-reboot";
   if (ctx.jobs.some((j) => j.state === "awaiting_approval") || ctx.pendingApprovals > 0) return "awaiting-approval";
   if (ctx.jobs.some((j) => ACTIVE.includes(j.state))) return "downloading";
-  if (ctx.jobs.some((j) => j.state === "failed")) return "error";
+  // 失败是终态、不是持续状态：只要之后有任何一次成功/推进，就不该继续把托盘钉在 error，
+  // 否则一条历史失败会永久盖住「有可用更新」这一行。
+  if (latestTransition(ctx.jobs)?.state === "failed") return "error";
   if (ctx.upgradeCount > 0) return "update-available";
   return "idle";
 }

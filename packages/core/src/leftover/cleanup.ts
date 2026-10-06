@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
+import { RUN_ROOTS, SERVICES_ROOT, UNINSTALL_ROOTS } from "../inventory/registry.ts";
 import type { RegClient } from "../inventory/registry.ts";
 import { writeBackupManifest, type BackupRecord } from "./backup.ts";
-import type { ResidueItem, ResidueReport, ResidueRisk } from "./scan.ts";
+import type { ResidueItem, ResidueKind, ResidueReport, ResidueRisk } from "./scan.ts";
 
 export type CleanupEffect = "delete-registry-key" | "delete-registry-value" | "delete-path";
 
@@ -24,17 +26,127 @@ export interface CleanupPolicy {
   confirmToken: string;
   /** 注册表删除前的 .reg 备份目录；缺失时拒绝执行。 */
   backupDir?: string;
+  /** 给了就「移动到回收目录」代替不可逆删除；仍需显式确认串，移动失败该项算 failed。 */
+  recycleDir?: string;
 }
 
 export const CONFIRM_TOKEN = "CONFIRM";
 
 const SEP = "\\";
 
-const FORBIDDEN_PREFIXES = [
-  ["C:", SEP + "WINDOWS"].join(""),
-  ["C:", SEP + "PROGRAMDATA", SEP + "MICROSOFT"].join(SEP),
-  ["C:", SEP + "USERS", SEP + "ALL USERS", SEP + "MICROSOFT"].join(SEP),
-].map((p) => p.toLowerCase());
+/** 文件类残留里永不删除的系统目录：按「盘符之后的首段目录名」判断，换盘安装也照样挡住。 */
+const SYSTEM_OWNED_HEADS: string[][] = [["windows"], ["winnt"], ["programdata", "microsoft"], ["users", "all users", "microsoft"]];
+
+/**
+ * 关键系统注册表子树。白名单作用域已经能挡住绝大多数越界目标，
+ * 这些是「作用域内但绝不能碰」的例外：删了就把网络栈/服务控制管理器一起带走。
+ */
+const PROTECTED_KEY_PREFIXES: string[] = [
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Control"],
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Services", "Tcpip"],
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Services", "Netbt"],
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Services", "AFD"],
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Services", "mrxsmb"],
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Services", "LanmanServer"],
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Services", "LanmanWorkstation"],
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Services", "Winmgmt"],
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Services", "Schedule"],
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Services", "RpcSs"],
+  ["HKLM", "SYSTEM", "CurrentControlSet", "Services", "DcomLaunch"],
+  ["HKLM", "SOFTWARE", "Microsoft", "Windows NT"],
+  ["HKLM", "SAM"],
+  ["HKLM", "SECURITY"],
+].map((parts) => parts.join(SEP).toLowerCase());
+
+const UNINSTALL_SCOPE_ROOTS = UNINSTALL_ROOTS.map((root) => root.path.toLowerCase());
+const RUN_SCOPE_ROOTS = RUN_ROOTS.map((root) => root.toLowerCase());
+const SERVICES_SCOPE_ROOT = SERVICES_ROOT.toLowerCase();
+const SOFTWARE_SCOPE_ROOTS = [
+  ["HKLM", "SOFTWARE"].join(SEP),
+  ["HKLM", "SOFTWARE", "WOW6432Node"].join(SEP),
+  ["HKCU", "SOFTWARE"].join(SEP),
+].map((parts) => parts.toLowerCase());
+const HKCR_ROOT = "hkcr";
+
+/**
+ * 各作用域的根键自身：删掉它们等于删掉整棵树（所有卸载项 / 所有启动项 / 所有服务 / 整个 SOFTWARE），
+ * 任何一条残留都不该产出这种动作。值级删除仍然允许（启动项本来就是 Run 键上的一个值）。
+ */
+const SCOPE_ROOTS_NEVER_DELETED = [
+  ...UNINSTALL_SCOPE_ROOTS,
+  ...RUN_SCOPE_ROOTS,
+  SERVICES_SCOPE_ROOT,
+  ...SOFTWARE_SCOPE_ROOTS,
+  HKCR_ROOT,
+  ["hkcr", "clsid"].join(SEP),
+];
+
+export interface Guard {
+  ok: boolean;
+  reason: string;
+}
+
+function segments(value: string): string[] {
+  return value.split(SEP).filter(Boolean);
+}
+
+function under(candidate: string, root: string): boolean {
+  return candidate.startsWith(root + SEP);
+}
+
+function isDirectChild(candidate: string, root: string): boolean {
+  return under(candidate, root) && segments(candidate).length === segments(root).length + 1;
+}
+
+export function isSystemOwnedPath(normalized: string): boolean {
+  const parts = segments(normalized);
+  const head = /^[a-z]:$/.test(parts[0] ?? "") ? parts.slice(1) : parts;
+  return SYSTEM_OWNED_HEADS.some((prefix) => prefix.every((part, index) => head[index] === part));
+}
+
+/**
+ * 注册表删除目标的收口。残留报告是可被伪造的输入，所以这里不看「像不像残留」，
+ * 只看键路径能不能由扫描器合法产出：服务键只能是 Services 的直接子键，
+ * 启动项只能落在 Run 根（且不许整键删 Run），厂商配置只能在三个 SOFTWARE 根之下，
+ * 右键菜单只能是 HKCR 之下且不许整棵 CLSID。
+ * 残余风险：作用域内仍能删掉别的软件自己的 SOFTWARE 子键——所以每一次注册表删除都必须先导出 .reg，
+ * 这条闸口不能替代备份，只能把「删任意键」这种灾难性越界挡住。
+ */
+export function isRegistryTargetSafe(keyPath: string, kind: ResidueKind, effect: CleanupEffect, valueName?: string): Guard {
+  const n = norm(keyPath);
+  if (!n) return { ok: false, reason: "empty registry key path" };
+  if (PROTECTED_KEY_PREFIXES.some((p) => n === p || under(n, p))) return { ok: false, reason: "protected system registry subtree" };
+  if (effect === "delete-registry-key" && SCOPE_ROOTS_NEVER_DELETED.includes(n)) return { ok: false, reason: "refusing to delete a scope root" };
+  if (effect === "delete-registry-value") {
+    if (!valueName) return { ok: false, reason: "value-level delete without a value name" };
+    // reg.exe 会把以 / 或 - 开头的参数当开关，值名不该长这样；挡住免得 /f 之类被当参数吞掉。
+    if (valueName.startsWith("/") || valueName.startsWith("-")) return { ok: false, reason: "value name looks like a reg.exe switch" };
+  }
+
+  if (kind === "service") {
+    if (!isDirectChild(n, SERVICES_SCOPE_ROOT)) return { ok: false, reason: "service key must be a direct child of the services root" };
+    return { ok: true, reason: "allowed" };
+  }
+  if (kind === "startup") {
+    const host = RUN_SCOPE_ROOTS.find((root) => n === root || under(n, root));
+    if (!host) return { ok: false, reason: "startup key is not under a Run root" };
+    if (effect === "delete-registry-key" && n === host) return { ok: false, reason: "refusing to delete an entire Run key" };
+    return { ok: true, reason: "allowed" };
+  }
+  if (kind === "registry") {
+    if (UNINSTALL_SCOPE_ROOTS.some((root) => isDirectChild(n, root))) return { ok: true, reason: "allowed" };
+    // 卸载树里只认「某一条卸载项」这一层：再深的键扫描器不会产出，而下面的 SOFTWARE 白名单会放行它。
+    if (UNINSTALL_SCOPE_ROOTS.some((root) => under(n, root))) return { ok: false, reason: "uninstall subtree target must be a single uninstall entry" };
+    if (SOFTWARE_SCOPE_ROOTS.some((root) => under(n, root))) return { ok: true, reason: "allowed" };
+    return { ok: false, reason: "registry key is outside the uninstall / vendor-config scope" };
+  }
+  if (kind === "contextmenu") {
+    if (!under(n, HKCR_ROOT)) return { ok: false, reason: "context menu key is not under HKCR" };
+    if (n === ["hkcr", "clsid"].join(SEP)) return { ok: false, reason: "refusing to delete the whole CLSID tree" };
+    return { ok: true, reason: "allowed" };
+  }
+  return { ok: false, reason: "not a registry residue kind" };
+}
 
 function norm(value: string): string {
   return value
@@ -46,7 +158,7 @@ function norm(value: string): string {
 export function isPathSafeToDelete(target: string, policy: CleanupPolicy): { ok: boolean; reason: string } {
   const n = norm(target);
   if (n.length <= 3) return { ok: false, reason: "refusing to delete a drive root" };
-  if (FORBIDDEN_PREFIXES.some((f) => n.startsWith(f))) return { ok: false, reason: "refusing to delete a system-owned path" };
+  if (isSystemOwnedPath(n)) return { ok: false, reason: "refusing to delete a system-owned path" };
   const allowed = policy.allowWriteRoots.map(norm).filter(Boolean);
   if (allowed.length === 0) return { ok: false, reason: "no allowed cleanup roots configured" };
   if (!allowed.some((root) => n === root || n.startsWith(root + SEP))) {
@@ -91,7 +203,15 @@ export function buildCleanupPlan(report: ResidueReport, policy: CleanupPolicy): 
       continue;
     }
     if (item.kind === "registry" || item.kind === "startup" || item.kind === "service" || item.kind === "contextmenu") {
-      actions.push(registryAction(item));
+      const action = registryAction(item);
+      // 这四类过去完全不过闸，等于「报告里写什么键就删什么键」——伪造一份报告就能删
+      // HKLM\SYSTEM\CurrentControlSet\Services\Tcpip。现在与文件类一样先做作用域收口。
+      const guard = isRegistryTargetSafe(action.keyPath, item.kind, action.effect, action.valueName);
+      if (!guard.ok) {
+        skipped.push({ item, reason: guard.reason });
+        continue;
+      }
+      actions.push(action);
       continue;
     }
     const guard = isPathSafeToDelete(item.path, policy);
@@ -108,6 +228,12 @@ export interface CleanupDeps {
   deleteRegistryKey(keyPath: string): Promise<void>;
   deleteRegistryValue(keyPath: string, valueName: string): Promise<void>;
   deletePath(path: string, recursive: boolean): Promise<void>;
+  /**
+   * 可选：把残留整体搬进回收目录（同盘 rename 就是移动），给了就不会做不可逆删除。
+   * 文件类残留过去只有 `deletePath(..., true)` 一条路——递归删除且不进备份清单，
+   * 删错了没有任何恢复手段（注册表类反而先导 .reg，两条路径的安全等级不一致）。
+   */
+  movePath?(from: string, to: string): Promise<void>;
   /** 注入式备份，生产用 reg.exe export，测试用假实现，避免执行器里藏着进程调用。 */
   exportRegistryKey(keyPath: string, dir: string): Promise<BackupRecord>;
 }
@@ -183,7 +309,13 @@ export async function executeCleanup(
   for (const action of actions) {
     if (action.effect === "delete-path") {
       try {
-        await deps.deletePath(action.target, true);
+        if (policy.recycleDir && deps.movePath) {
+          // 移动到回收目录而不是就地删掉：同盘 rename 对目录同样成立，失败就是抛错、不会留下半个副本。
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          await deps.movePath(action.target, path.join(policy.recycleDir, path.basename(action.target) + "." + stamp));
+        } else {
+          await deps.deletePath(action.target, true);
+        }
         applied.push(action);
       } catch (err) {
         failed.push({ action, message: err instanceof Error ? err.message : String(err) });

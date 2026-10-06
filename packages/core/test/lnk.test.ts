@@ -64,3 +64,29 @@ test("scheduled task xml yields every executable and argument", () => {
   assert.deepEqual(taskExecutables(xml), [["C:", "Demo", "app.exe"].join(BS), "--silent"]);
   assert.deepEqual(taskExecutables("<Task><Nothing/></Task>"), []);
 });
+
+/**
+ * 真机取证：`measure:lnk-targets` 对本机开始菜单 69 个带 LinkInfo 的 .lnk 逐一验证，
+ * 本地基路径偏移实际落在 LINKINFO +0x10 处的字段（实测样本该字段=45，路径真字节恰在 +45），
+ * 而非教科书直觉的 +0x08。这里用与真实文件同构的字节布局（含 VolumeID 前置块）锁定该契约，
+ * 防止日后按“规范偏移”改动反而把真机解析改坏。
+ */
+test("parses the local base path from a real-shaped LINKINFO (VolumeID block + offset field at +0x10)", () => {
+  const target = ["C:", "Program Files (x86)", "Ecloud AI Assist", "aiassistant.exe"].join(BS);
+  const localPath = Buffer.from(target, "latin1");
+  const pathOffset = 45; // 相对 LINKINFO 起点；真机样本实测值
+  const header = Buffer.alloc(76);
+  header.writeUInt32LE(76, 0);
+  Buffer.from("0114020000000000c000000000000046", "hex").copy(header, 4);
+  header.writeUInt32LE(0x00000002, 20); // HAS_LINK_INFO（无 IDList，起点即 76）
+
+  const linkInfo = Buffer.alloc(pathOffset);
+  linkInfo.writeUInt32LE(pathOffset + localPath.length + 1, 0x00); // Length
+  linkInfo.writeUInt32LE(28, 0x04); // VolumeIDOffset（前置块，真机=28）
+  linkInfo.writeUInt32LE(1, 0x08); // 真机该处为 1，不是本地路径偏移
+  linkInfo.writeUInt32LE(28, 0x0c);
+  linkInfo.writeUInt16LE(pathOffset, 0x10); // 解析器据此取本地基路径
+
+  const link = parseShellLink(Buffer.concat([header, linkInfo, localPath, Buffer.alloc(1)]));
+  assert.equal(link?.target, target);
+});

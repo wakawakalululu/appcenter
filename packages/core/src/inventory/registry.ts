@@ -86,7 +86,13 @@ export function expandHive(path: string): string {
 }
 
 const KEY_LINE = /^[A-Z][A-Z0-9_]*\\/;
-const VALUE_LINE = /^\s{4}(\S+)\s+(REG_[A-Z_]+)\s+(.*)$/;
+/**
+ * 值行形如 `    DisplayName    REG_SZ    演示应用`。
+ * 值名不能再写成 `(\S+)`：真机上大量 `Inno Setup: App Path`、`AuthorizedInstances`之类带空格的值名
+ * 会被整行丢弃（实测 HKLM64 丢 28/727、WOW6432 丢 14/2210、HKCU 丢 21/156、Fonts 丢 167/167），
+ * 残留扫描因此少报。改成懒惰匹配到第一个 `REG_<类型>` 词元为止；数据段允许为空。
+ */
+const VALUE_LINE = /^\s{4}(.+?)\s+(REG_[A-Z_]+)(?:\s+(.*))?$/;
 
 export function parseRegQuery(output: string): RegistryKey[] {
   const keys: RegistryKey[] = [];
@@ -110,6 +116,12 @@ export function parseRegQuery(output: string): RegistryKey[] {
         .split("\\0")
         .filter(Boolean)
         .join("\n");
+    }
+    if (type === "REG_DWORD" || type === "REG_QWORD") {
+      // reg.exe 把整型打成 `0x1` 这种十六进制文本。上层是直接字符串比较的
+      // （如 `readValue(key,"WindowsInstaller") === "1"`），归一成十进制才不会永远判不中。
+      const hex = /^0x([0-9a-f]+)$/i.exec(data.trim());
+      if (hex) data = BigInt("0x" + (hex[1] ?? "0")).toString();
     }
     current.values.push({ name, type, data });
   }

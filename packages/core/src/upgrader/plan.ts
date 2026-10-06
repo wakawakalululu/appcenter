@@ -25,18 +25,23 @@ export interface UpgradePlanInput {
   includeUnknown?: boolean;
 }
 
+/**
+ * 升级候选只认名字关系。厂商相同不能作为匹配依据：
+ * 真机上「Microsoft Visual C++ 2015-2022」与「Microsoft Diagnostics Hub」共享厂商，
+ * 只凭 publisher 相等就会把前者升级成后者；空 DisplayVersion 也不参与比较
+ * （`compare("1.2.0","")` 恒大于 0，会造出一个永远升不完的候选）。
+ */
 function bestMatch(installed: InstalledApp, app: AppSummary): boolean {
-  const name = installed.displayName.toLowerCase();
-  const target = app.name.toLowerCase();
-  if (name === target) return true;
-  if (name.includes(target) || target.includes(name)) return true;
-  return installed.publisher.length > 0 && app.publisher.length > 0 && installed.publisher.toLowerCase() === app.publisher.toLowerCase();
+  const name = installed.displayName.toLowerCase().trim();
+  const target = app.name.toLowerCase().trim();
+  if (!name || !target) return false;
+  return name === target || name.includes(target) || target.includes(name);
 }
 
 export async function buildUpgradePlan(input: UpgradePlanInput): Promise<UpgradeCandidate[]> {
   const out: UpgradeCandidate[] = [];
   for (const app of input.catalog) {
-    const match = input.installed.find((i) => bestMatch(i, app));
+    const match = input.installed.find((i) => bestMatch(i, app) && i.displayVersion.trim() !== "");
     if (!match) continue;
     if (compare(app.latestVersion, match.displayVersion) <= 0) continue;
     const detail = await input.details(app.id);

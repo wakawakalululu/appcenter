@@ -86,9 +86,38 @@ async function runDemo(serverUrl: string, userId: string): Promise<void> {
   console.log("approval-gated install state: " + job.state + " " + (job.error ?? ""));
 }
 
+async function runRepoSync(serverUrl: string, userId: string, allVersions: boolean, dir?: string): Promise<void> {
+  const facade = buildFacade(serverUrl, userId);
+  console.log("catalog loaded: " + String(await facade.refreshCatalog()) + " apps");
+  const report = await facade.syncLocalRepo({ allVersions, dir });
+  console.log("repo root: " + report.root);
+  console.log(
+    "synced: " + String(report.saved.length) + " saved, " + String(report.cached.length) + " cached, " + String(report.failed.length) + " failed, " +
+      String(Math.round(report.totalBytes / 1024)) + " KB in " + String(report.durationMs) + "ms",
+  );
+  for (const failure of report.failed) console.log("  failed: " + failure.appId + "@" + failure.version + " " + failure.error);
+  console.log("manifest: " + report.manifestFile);
+}
+
+async function runRepoStatus(dir?: string): Promise<void> {
+  const facade = buildFacade(serverUrl, userId);
+  const status = await facade.localRepoStatus(dir);
+  if (!status.manifestExists) {
+    console.log("no manifest at " + status.manifestFile + " — run repo-sync first");
+    return;
+  }
+  console.log("repo root: " + status.root);
+  console.log("items: " + String(status.items.length) + " (" + String(status.saved) + " saved, " + String(status.failed) + " failed, " + String(status.pending) + " pending), " + String(Math.round(status.totalBytes / 1024)) + " KB");
+  for (const item of status.items) {
+    console.log("  [" + item.status + "] " + item.name + " " + item.version + " " + String(Math.round(item.sizeBytes / 1024)) + " KB → " + item.relativePath);
+  }
+}
+
 const serverUrl = process.env.APPCENTER_API ?? "http://127.0.0.1:7991";
 const userId = process.env.APPCENTER_USER ?? os.userInfo().username;
 const mode = process.argv[2] ?? "shell";
+const repoDir = process.argv.find((arg) => arg.startsWith("--dir="))?.slice(6);
+const allVersions = process.argv.includes("--all-versions");
 
 if (mode === "search") {
   const facade = buildFacade(serverUrl, userId);
@@ -97,8 +126,12 @@ if (mode === "search") {
   }
 } else if (mode === "demo") {
   await runDemo(serverUrl, userId);
+} else if (mode === "repo-sync") {
+  await runRepoSync(serverUrl, userId, allVersions, repoDir);
+} else if (mode === "repo-status") {
+  await runRepoStatus(repoDir);
 } else if (mode === "shell") {
   await runShell(serverUrl, userId);
 } else {
-  console.log("usage: appcenter <search KEYWORD> | demo | shell");
+  console.log("usage: appcenter <search KEYWORD> | demo | repo-sync [--all-versions] [--dir=PATH] | repo-status [--dir=PATH] | shell");
 }

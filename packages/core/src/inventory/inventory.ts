@@ -26,7 +26,17 @@ export interface InstalledApp {
   needsElevation: boolean;
 }
 
-const SYSTEM_HINTS = ["KB", "SERVICE PACK", "UPDATE FOR", "SECURITY UPDATE", "HOTFIX", "MICROSOFT SQL"];
+/**
+ * Windows 更新组件的识别短语。两处收口：
+ * - `KB` 不再当裸子串用，必须后跟数字（KB5034441 这种补丁号），否则偶然含 "KB" 的正常软件会被误判；
+ * - 去掉 `MICROSOFT SQL`：SQL Server 是用户主动安装的产品，标成系统组件等于直接从清单里消失。
+ */
+const SYSTEM_HINTS = ["SERVICE PACK", "UPDATE FOR", "SECURITY UPDATE", "HOTFIX"];
+
+export function isSystemComponent(displayName: string): boolean {
+  const upper = displayName.toUpperCase();
+  return SYSTEM_HINTS.some((hint) => upper.includes(hint)) || /\bKB\d{3,}\b/.test(upper);
+}
 
 export function toInstalledApp(key: RegistryKey, scope: string, hive: string, needsElevation = false): InstalledApp | null {
   const displayName = readValue(key, "DisplayName");
@@ -50,7 +60,7 @@ export function toInstalledApp(key: RegistryKey, scope: string, hive: string, ne
     isMsi: windowsInstaller || /msiexec/i.test(uninstallString ?? ""),
     estimatedSizeKb: Number(readValue(key, "EstimatedSize") ?? 0) || 0,
     installDate: readValue(key, "InstallDate") ?? null,
-    systemComponent: SYSTEM_HINTS.some((hint) => displayName.toUpperCase().includes(hint)),
+    systemComponent: isSystemComponent(displayName),
     needsElevation,
   };
 }

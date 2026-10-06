@@ -32,6 +32,15 @@ async function sha256(file: string): Promise<string> {
   return hash.digest("hex");
 }
 
+/** 供上层做「换版前后是否真的变了」判据用；文件不存在时返回 null 而不是抛。 */
+export async function fileSha256(file: string): Promise<string | null> {
+  try {
+    return await sha256(file);
+  } catch {
+    return null;
+  }
+}
+
 function backupName(targetPath: string, stamp: string): string {
   const base = path.basename(targetPath, path.extname(targetPath));
   return path.join(path.dirname(targetPath), base + "-" + stamp + path.extname(targetPath));

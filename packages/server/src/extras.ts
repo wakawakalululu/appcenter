@@ -6,6 +6,46 @@ import { DEFAULT_STALE_AFTER_MS, stalenessOf, type AssetApp, type FleetAgent, ty
 /** 每台机器保留的历史心跳条数上限，超出即剪掉最旧的，避免时序表无限膨胀。 */
 const HISTORY_LIMIT = 100;
 
+/** machineId 与列表长度的硬上限：这两个字段完全由客户端给，不设界就等于任人塞任意大的行。 */
+const MAX_MACHINE_ID_LENGTH = 200;
+const MAX_LIST_ITEMS = 5000;
+
+/** `decodeURIComponent("%zz")` 这类畸形转义会抛异常，过去一路冒到 500。 */
+export function decodeSegment(value: string | undefined): string {
+  try {
+    return decodeURIComponent(value ?? "");
+  } catch {
+    return value ?? "";
+  }
+}
+
+/**
+ * 计数列都是 NOT NULL：`Number({})`、`Number("abc")` 得到 NaN 会让整条写入炸成 500，这里统一收口。
+ * 只认真数字或纯数字字符串——`Number([1])` 是 1、`Number(true)` 是 1，数组与布尔都不该当成计数。
+ */
+export function intOf(value: unknown, fallback: number): number {
+  if (typeof value === "number") return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : fallback;
+  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) return Math.max(0, Number(value.trim()));
+  return fallback;
+}
+
+/**
+ * 运营位时间窗判断。库里的 starts_at/ends_at 可能是 `2026-09-01T00:00:00+08:00`
+ * 这种带偏移的写法，与 `new Date().toISOString()` 的 Z 文本做字符串比较会错位
+ * （`"+08:00" > "Z"`），所以一律按 epoch 比较。
+ */
+export function withinBannerWindow(startsAt: unknown, endsAt: unknown, nowMs: number): boolean {
+  const at = (value: unknown): number | null => {
+    const text = String(value ?? "").trim();
+    if (!text) return null;
+    const time = Date.parse(text);
+    return Number.isFinite(time) ? time : null;
+  };
+  const start = at(startsAt);
+  const end = at(endsAt);
+  return (start === null || start <= nowMs) && (end === null || end >= nowMs);
+}
+
 /**
  * 应用中心的服务端补充能力，对应服务端架构设计 §5/§6：
  * 安装回执（分发是否真的装上了）、运营位 banner、审批通知与 done 回执。
@@ -19,6 +59,8 @@ const TABLES: string[] = [
   "CREATE TABLE IF NOT EXISTS heartbeats (machine_id TEXT PRIMARY KEY, app_version TEXT NOT NULL DEFAULT '', installed_count INTEGER NOT NULL DEFAULT 0, upgradable_count INTEGER NOT NULL DEFAULT 0, needs_approval_count INTEGER NOT NULL DEFAULT 0, pending_approvals INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL DEFAULT '{}', first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL)",
   // 心跳时序：每次上报追加一行计数快照，按机器保留最近 HISTORY_LIMIT 条。
   "CREATE TABLE IF NOT EXISTS heartbeat_history (seq INTEGER PRIMARY KEY AUTOINCREMENT, machine_id TEXT NOT NULL, installed_count INTEGER NOT NULL DEFAULT 0, upgradable_count INTEGER NOT NULL DEFAULT 0, needs_approval_count INTEGER NOT NULL DEFAULT 0, reported_at TEXT NOT NULL)",
+  // 机群视图与剪枝都按 machine_id 过滤；没索引时每条心跳的 DELETE...NOT IN 会全表扫历史。
+  "CREATE INDEX IF NOT EXISTS idx_heartbeat_history_machine ON heartbeat_history (machine_id, seq)",
 ];
 
 export interface Bundle {
@@ -79,9 +121,11 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
   const segments = url.pathname.split("/").filter(Boolean);
 
   if (segments[0] === "api" && segments[1] === "banners" && method === "GET") {
-    const now = new Date().toISOString();
-    const rows = ctx.db.prepare("SELECT * FROM banners WHERE active = 1 AND (starts_at IS NULL OR starts_at <= ?) AND (ends_at IS NULL OR ends_at >= ?) ORDER BY sort_order, id").all(now, now) as Record<string, unknown>[];
-    send(res, 200, rows.map(toBanner));
+    // 时间窗不能交给 SQL 做字符串比较：starts_at 可能是 `...+08:00` 带偏移的写法，
+    // 与 toISOString() 的 Z 文本比较会错位（"+" 的字符码大于 "Z"），于是过期的运营位仍在外露。
+    const nowMs = Date.now();
+    const rows = ctx.db.prepare("SELECT * FROM banners WHERE active = 1 ORDER BY sort_order, id").all() as Record<string, unknown>[];
+    send(res, 200, rows.filter((row) => withinBannerWindow(row.starts_at, row.ends_at, nowMs)).map(toBanner));
     return true;
   }
   if (segments[0] === "api" && segments[1] === "admin" && segments[2] === "banners" && method === "POST") {
@@ -119,18 +163,22 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
     return true;
   }
 
-  if (segments[0] === "api" && segments[1] === "apps" && segments[3] === "receipt") {
-    const appId = decodeURIComponent(segments[2] ?? "");
+  if (segments[0] === "api" && segments[1] === "apps" && segments[3] === "receipt" && method === "POST") {
+    // 过去这条写路由不校验方法：GET /api/apps/<id>/receipt 也会插一行，
+    // 等于任何页面用一个 <img src> 就能伪造回执（CSRF）。
+    const appId = decodeSegment(segments[2]);
     const input = await body(req);
     const result = input.result === "failed" ? "failed" : "success";
+    const exitCode = input.exitCode === undefined || input.exitCode === null ? null : intOf(input.exitCode, 0);
+    const durationMs = input.durationMs === undefined || input.durationMs === null ? null : intOf(input.durationMs, 0);
     ctx.db
       .prepare("INSERT INTO receipts (app_id, version, result, exit_code, duration_ms, error, machine, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(appId, String(input.version ?? ""), result, input.exitCode === undefined ? null : Number(input.exitCode), input.durationMs === undefined ? null : Number(input.durationMs), String(input.error ?? ""), String(input.machine ?? ""), new Date().toISOString());
+      .run(appId, String(input.version ?? "").slice(0, 120), result, exitCode, durationMs, String(input.error ?? "").slice(0, 2000), String(input.machine ?? "").slice(0, MAX_MACHINE_ID_LENGTH), new Date().toISOString());
     send(res, 201, { ok: true });
     return true;
   }
   if (segments[0] === "api" && segments[1] === "apps" && segments[3] === "receipts" && method === "GET") {
-    const appId = decodeURIComponent(segments[2] ?? "");
+    const appId = decodeSegment(segments[2]);
     const rows = ctx.db.prepare("SELECT * FROM receipts WHERE app_id = ? ORDER BY created_at DESC LIMIT 20").all(appId) as Record<string, unknown>[];
     send(res, 200, rows.map((r) => ({ version: String(r.version), result: String(r.result), exitCode: r.exit_code === null ? null : Number(r.exit_code), durationMs: r.duration_ms === null ? null : Number(r.duration_ms), error: String(r.error), createdAt: String(r.created_at) })));
     return true;
@@ -143,7 +191,7 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
     return true;
   }
   if (segments[0] === "api" && segments[1] === "notifications" && segments[3] === "done" && method === "POST") {
-    const id = decodeURIComponent(segments[2] ?? "");
+    const id = decodeSegment(segments[2]);
     const result = ctx.db.prepare("UPDATE approvals SET notified_done = 1 WHERE id = ?").run(id);
     send(res, Number(result.changes ?? 0) > 0 ? 200 : 404, { ok: Number(result.changes ?? 0) > 0 });
     return true;
@@ -154,12 +202,18 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
     const input = await body(req);
     const machineId = String(input.machineId ?? "");
     if (!machineId) return send(res, 400, { error: "machineId required" }), true;
+    if (machineId.length > MAX_MACHINE_ID_LENGTH) return send(res, 400, { error: "machineId too long" }), true;
     const installed = Array.isArray(input.installed) ? (input.installed as AssetApp[]) : [];
     const needsApproval = Array.isArray(input.needsApproval) ? input.needsApproval.map(String) : [];
+    if (installed.length > MAX_LIST_ITEMS || needsApproval.length > MAX_LIST_ITEMS) {
+      return send(res, 413, { error: "heartbeat payload too large" }), true;
+    }
     const counts = (input.counts ?? {}) as Record<string, unknown>;
-    const installedCount = Number(counts.installed ?? installed.length);
-    const upgradableCount = Number(counts.upgradable ?? installed.filter((app) => app?.upgradable === true).length);
-    const needsApprovalCount = Number(counts.needsApproval ?? needsApproval.length);
+    // 这几列都是 NOT NULL：客户端给个对象或字符串就会得到 NaN，整条上报炸成 500。
+    const installedCount = intOf(counts.installed, installed.length);
+    const upgradableCount = intOf(counts.upgradable, installed.filter((app) => app?.upgradable === true).length);
+    const needsApprovalCount = intOf(counts.needsApproval, needsApproval.length);
+    const pendingApprovals = intOf(counts.pendingApprovals, 0);
     const now = new Date().toISOString();
     const existing = ctx.db.prepare("SELECT first_seen_at FROM heartbeats WHERE machine_id = ?").get(machineId) as Record<string, unknown> | undefined;
     const firstSeen = existing ? String(existing.first_seen_at) : now;
@@ -167,7 +221,7 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
       .prepare(
         "INSERT INTO heartbeats (machine_id, app_version, installed_count, upgradable_count, needs_approval_count, pending_approvals, payload, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET app_version=excluded.app_version, installed_count=excluded.installed_count, upgradable_count=excluded.upgradable_count, needs_approval_count=excluded.needs_approval_count, pending_approvals=excluded.pending_approvals, payload=excluded.payload, last_seen_at=excluded.last_seen_at",
       )
-      .run(machineId, String(input.appVersion ?? ""), installedCount, upgradableCount, needsApprovalCount, Number(counts.pendingApprovals ?? 0), JSON.stringify({ installed, needsApproval }), firstSeen, now);
+      .run(machineId, String(input.appVersion ?? "").slice(0, 120), installedCount, upgradableCount, needsApprovalCount, pendingApprovals, JSON.stringify({ installed, needsApproval }), firstSeen, now);
     // 时序快照只留计数；插入后按机器剪枝到最近 HISTORY_LIMIT 条。
     ctx.db.prepare("INSERT INTO heartbeat_history (machine_id, installed_count, upgradable_count, needs_approval_count, reported_at) VALUES (?, ?, ?, ?, ?)").run(machineId, installedCount, upgradableCount, needsApprovalCount, now);
     ctx.db

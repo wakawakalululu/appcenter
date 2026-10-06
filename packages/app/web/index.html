@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>应用中心</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
@@ -161,6 +162,17 @@
             <div class="setting-card">
               <h3>窗口</h3>
               <ul id="window-list" class="plain-list"></ul>
+            </div>
+            <div class="setting-card">
+              <h3>本地应用包仓库</h3>
+              <p class="card-sub">把目录应用的安装包保存到本地并生成 manifest 清单（含目录快照），供离线安装与审计；已保存的包会跳过，失败项下次同步自动重试。</p>
+              <div class="row-actions">
+                <button class="primary" id="btn-repo-sync">同步最新版</button>
+                <button class="ghost" id="btn-repo-sync-all">同步全部版本</button>
+                <button class="ghost" id="btn-repo-status">刷新状态</button>
+              </div>
+              <p class="card-sub" id="repo-meta"></p>
+              <ul id="repo-items" class="plain-list"></ul>
             </div>
             <div class="setting-card">
               <h3>客户端更新</h3>

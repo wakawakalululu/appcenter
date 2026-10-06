@@ -4,20 +4,57 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
+
+# 同分支新 push 直接取消旧跑，省排队与额度。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    name: typecheck · test · smoke（Windows 全链）
+    runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
-      - run: npm install
-      - run: npm run typecheck
-      - run: npm test
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # 单一入口：typecheck → 全部单测/集成 → smoke（真注册表扫描 + CLI IPC）。
+      # 必须用 Windows runner：注册表清单、GDI+ 图标、WinForms 托盘都是 Windows 专属。
+      - run: npm run ci
+
+  demo:
+    name: demo 启动 · UI 截图产物
+    runs-on: windows-latest
+    needs: verify
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # 目录 API(7991) + UI(8080) 同进程起，后台运行给足预热。
+      - name: Start demo
+        shell: bash
+        run: |
+          node --experimental-transform-types scripts/ui-demo.mts &
+          sleep 12
+      # 无头 Chrome/Edge 驱动真实页面：切 fresh 皮肤、逐视图截图，页面错误会让脚本退出非零。
+      - name: Capture UI screenshots
+        shell: bash
+        run: node --experimental-transform-types scripts/ui-shot.mts http://127.0.0.1:8080/ .shots "skin:fresh,home,categories,installed,upgrade,search" 1237x762
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: .shots/*.png
+          if-no-files-found: error

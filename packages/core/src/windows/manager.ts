@@ -39,6 +39,8 @@ const DEFAULT_SIZE: Record<WindowRole, [number, number]> = {
 
 export class WindowManager {
   private readonly windows = new Map<string, WindowDescriptor>();
+  /** `role[:key]` → 窗口 id。过去 key 只算出来就被 `void key` 丢掉，同 role 多实例根本分不开。 */
+  private readonly byKey = new Map<string, string>();
 
   constructor(private readonly host: WindowHost) {}
 
@@ -50,10 +52,24 @@ export class WindowManager {
     return this.windows.get(id);
   }
 
+  /**
+   * 宿主（OS）侧真正关闭窗口时调用，抹掉管理器里的描述符。
+   * 不抹掉的话，下一次 open()/focusOrOpen() 会复用一个已经不存在的窗口 id：
+   * `host.show(死 id)` 既不报错也不开窗，界面上看就是「点任务栏没反应」。
+   */
+  remove(id: string): void {
+    const win = this.windows.get(id);
+    if (!win) return;
+    this.windows.delete(id);
+    for (const [key, mapped] of this.byKey) if (mapped === id) this.byKey.delete(key);
+  }
+
   async open(role: WindowRole, options: OpenOptions = {}): Promise<WindowDescriptor> {
     const key = role + (options.key ? ":" + options.key : "");
     if (!options.allowMultiple) {
-      const existing = [...this.windows.values()].find((w) => w.role === role);
+      // 带 key 的角色按 key 复用（同 role 可以有多个实例）；不带 key 的保持原「每角色单例」行为。
+      const keyed = this.windows.get(this.byKey.get(key) ?? "");
+      const existing = keyed ?? (options.key ? undefined : [...this.windows.values()].find((w) => w.role === role));
       if (existing) {
         await this.host.show(existing.id);
         await this.host.focus(existing.id);
@@ -63,8 +79,15 @@ export class WindowManager {
         return existing;
       }
     } else {
-      const existing = [...this.windows.values()].find((w) => w.route === (options.route ?? ""));
-      if (existing) return existing;
+      // 只在同 role 内按 route 复用：跨 role 命中会返回另一个角色的窗口，而且既不 show 也不 focus。
+      const existing = [...this.windows.values()].find((w) => w.role === role && w.route === (options.route ?? ""));
+      if (existing) {
+        await this.host.show(existing.id);
+        await this.host.focus(existing.id);
+        existing.visible = true;
+        existing.focused = true;
+        return existing;
+      }
     }
     const [width, height] = DEFAULT_SIZE[role];
     const created = await this.host.create({
@@ -85,7 +108,7 @@ export class WindowManager {
       closeToTray: role === "main",
     };
     this.windows.set(descriptor.id, descriptor);
-    void key;
+    this.byKey.set(key, descriptor.id);
     return descriptor;
   }
 
@@ -106,7 +129,7 @@ export class WindowManager {
       return { minimizedToTray: true };
     }
     await this.host.close(id);
-    this.windows.delete(id);
+    this.remove(id);
     return { minimizedToTray: false };
   }
 
