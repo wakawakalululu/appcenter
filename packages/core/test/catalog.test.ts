@@ -109,6 +109,20 @@ test("semver compare and range", () => {
   assert.ok(!satisfies("2.0.0", ">=1.0.0,<2.0.0"));
 });
 
+test("semver compare handles the 4-part versions Windows actually reports", () => {
+  // 真机上常见四段版本，旧实现只比前三段 → 这些都会被误判为相等，漏报可升级
+  assert.equal(compare("12.1.0.28488", "12.1.0.30100"), -1); // WPS 内部构建号
+  assert.equal(compare("12.1.0.30100", "12.1.0.28488"), 1);
+  assert.equal(compare("6.9.1.868", "6.9.1.9999"), -1); // Quark
+  assert.equal(compare("14.40.33214.0", "14.42.34433.0"), -1); // VC++ Redistributable
+  assert.equal(compare("10.0.26624", "10.1.26100.7705"), -1); // Universal CRT（前置取最高依赖此序）
+  // 第四段相等或缺失视为同版本，尾部补零不改变结果
+  assert.equal(compare("12.1.0", "12.1.0.0"), 0);
+  assert.equal(compare("1.2.3.4", "1.2.3.4"), 0);
+  // 数字核心相等时仍按预发布/构建元数据规则
+  assert.equal(compare("1.2.3.4-beta", "1.2.3.4"), -1);
+});
+
 test("bayesian smoothing keeps a single five-star app below a proven one", () => {
   const crowd = Array.from({ length: 6 }, (_, i) => ({
     id: "crow" + String(i),

@@ -53,13 +53,31 @@ function comparePrerelease(a: string, b: string): number {
   return 0;
 }
 
+function prereleaseOf(input: string): string {
+  return /-([0-9A-Za-z.-]+)$/.exec(input.trim().replace(/^v/i, ""))?.[1] ?? "";
+}
+
+/** 点分数字核心（不限三段）。Windows 版本常见四段（如 12.1.0.28488 / 14.40.33214.0），
+ *  只取前三段会把仅第四段不同的版本误判为相等，导致漏报可升级。 */
+function numericCore(input: string): number[] {
+  const head = input.trim().replace(/^v/i, "").split(/[-+]/)[0] ?? "";
+  if (head === "") return [0];
+  return head.split(".").map((seg) => {
+    const digits = /^\d+/.exec(seg);
+    return digits ? Number(digits[0]) : 0;
+  });
+}
+
 export function compare(a: string, b: string): number {
-  const x = parseTolerant(a);
-  const y = parseTolerant(b);
-  for (const key of ["major", "minor", "patch"] as const) {
-    if (x[key] !== y[key]) return x[key] < y[key] ? -1 : 1;
+  const ca = numericCore(a);
+  const cb = numericCore(b);
+  const n = Math.max(ca.length, cb.length);
+  for (let i = 0; i < n; i++) {
+    const x = ca[i] ?? 0;
+    const y = cb[i] ?? 0;
+    if (x !== y) return x < y ? -1 : 1;
   }
-  return comparePrerelease(x.prerelease, y.prerelease);
+  return comparePrerelease(prereleaseOf(a), prereleaseOf(b));
 }
 
 export function gt(a: string, b: string): boolean {
