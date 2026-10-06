@@ -95,16 +95,25 @@ ADMIN_TOKEN=xxx DB_FILE=/var/lib/appcenter/catalog.db PACKAGE_ROOT=/srv/packages
 
 已完成：目录 / 分类 / 搜索 / 评分 / 清单（含缓存与增量刷新）/ 残留扫描 / 清理计划与备份撤销 /
 断点续传下载 / 多类型安装执行计划 / 装后版本回读 / 编排与批量队列 / 升级计划 / 自升级 /
-审批与通知回路 / 皮肤 / 窗口 / 托盘 / 开机自启开关 / 服务端（鉴权、审计、部门目录、捆绑包、运营位）/
-CLI 与桌面 UI，共 90 项测试。
+审批与通知回路 / 皮肤 / 窗口 / 托盘 / 开机自启开关 / 真机安装包发现与本地仓库镜像 /
+服务端（鉴权、审计、部门目录、捆绑包、运营位）/ CLI 与桌面 UI，共 101 项测试。
 
 目录应用支持 `installMode: silent | manual`——手动安装弹真实安装向导（执行计划剥掉静默参数）。
+
+发现与镜像用两条脚本即可复现：`npm run discover`（只发现并落 `discover-report.json`）、
+`npm run build:real-catalog`（发现 → 替换演示目录 → 镜像到 `local-repo/`）。
 
 未完成（需要真实环境或额外决策）：
 - 打包为可双击安装的桌面产物（Tauri 配置已就位，构建需本机工具链）
 - MSIX / 归档安装的实机端到端验证
 - 真实升级链路与真实安装包的端到端演练
 - 开机自启与托盘图标在真实桌面会话下的验收
+
+## 文档与站点
+
+- 架构与 API 文档站（GitHub Pages）：<https://wakawakalululu.github.io/appcenter/>
+- 使用与协议说明（Wiki）：<https://github.com/wakawakalululu/appcenter/wiki>
+- 变更记录：[CHANGELOG.md](CHANGELOG.md)
 
 ## 桌面 UI（packages/app）
 
