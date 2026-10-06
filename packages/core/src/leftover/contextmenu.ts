@@ -108,8 +108,10 @@ export async function scanContextMenu(
   });
 
   const seen = new Set<string>();
-  for (const { root, key, value, guid } of candidates) {
-    const marker = root.toLowerCase() + "|" + value.name.toLowerCase();
+  for (const { key, value, guid } of candidates) {
+    // 残留身份是「处理子键 + 值」本身，而不是 (挂载根, 值名)：后者会让同一挂载根下
+    // 两个都把 CLSID 写进 (Default) 的处理子键相互吞掉，导致漏报。
+    const marker = key.path.toLowerCase() + "|" + value.name.toLowerCase();
     if (seen.has(marker)) continue;
     const { server, description } = clsidCache.get(guid) ?? { server: null, description: "" };
     const evidence = [server ?? "", description, value.data].filter(Boolean);

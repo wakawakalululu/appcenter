@@ -246,19 +246,19 @@ test("the same CLSID mounted on several handlers is resolved only once", async (
   assert.equal(clsidQueries.length, 1, "同一 CLSID 只应解析一次，实际 " + String(clsidQueries.length) + " 次");
 });
 
-test("context menu pre-resolves each unique CLSID once, reporting only matching handlers", async () => {
+test("context menu reports every matching handler and resolves each unique CLSID once", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "ctx-parallel-"));
   const hit = "{11111111-1111-1111-1111-111111111111}";
   const miss = "{22222222-2222-2222-2222-222222222222}";
   const hitClsidPath = ["HKCR", "CLSID", hit].join(BS);
   const missClsidPath = ["HKCR", "CLSID", miss].join(BS);
   const starRoot = ["HKCR", "*", "shellex", "ContextMenuHandlers"].join(BS);
-  const dirRoot = ["HKCR", "Directory", "shellex", "ContextMenuHandlers"].join(BS);
   const folderRoot = ["HKCR", "Folder", "shellex", "ContextMenuHandlers"].join(BS);
   const reg = new InMemoryRegClient([
-    // 同一命中 CLSID 挂在两个不同挂载根；另有一个不相关 CLSID 在第三个根
+    // 两个命中处理子键挂在同一挂载根（* ）下、都把同一个 CLSID 写进 (Default)——
+    // 这正考验去重是否按「处理子键路径」而非「(根, 值名)」；外加一个不相关 CLSID 在另一个根。
     regKey(starRoot + BS + "Mine1", { "(Default)": hit }),
-    regKey(dirRoot + BS + "Mine2", { "(Default)": hit }),
+    regKey(starRoot + BS + "Mine2", { "(Default)": hit }),
     regKey(folderRoot + BS + "Other", { "(Default)": miss }),
     regKey(hitClsidPath, { "(Default)": "My Shell" }),
     regKey(hitClsidPath + BS + "InprocServer32", { "(Default)": installDirOf("DemoShell") + BS + "mine.dll" }),
@@ -281,12 +281,12 @@ test("context menu pre-resolves each unique CLSID once, reporting only matching 
     env: { programData: dir, appData: dir, commonStartMenu: dir, userStartMenu: dir, temp: dir, systemRoot: dir },
   });
 
-  // 两个命中挂载点各报一条，顺序按 CONTEXTMENU_ROOTS 遍历序（* 先于 Directory），不相关处理程序不报。
+  // 同根两个命中子键都要报出（去重键已按处理子键路径），不相关处理程序不报，顺序按遍历序。
   const hits = report.items.filter((i) => i.kind === "contextmenu");
-  assert.deepEqual(hits.map((h) => h.path), [starRoot + BS + "Mine1", dirRoot + BS + "Mine2"], "命中项顺序与内容不变");
+  assert.deepEqual(hits.map((h) => h.path), [starRoot + BS + "Mine1", starRoot + BS + "Mine2"], "同根多个命中处理程序都应报出");
   // 两趟预解析：每个唯一 CLSID 各解析一次，即便 miss 不匹配也被解析（用于判定）。
   const hitQueries = counting.queried.filter((p) => p.toLowerCase().startsWith(hitClsidPath.toLowerCase()));
   const missQueries = counting.queried.filter((p) => p.toLowerCase().startsWith(missClsidPath.toLowerCase()));
-  assert.equal(hitQueries.length, 1, "命中 CLSID 只解析一次");
+  assert.equal(hitQueries.length, 1, "命中 CLSID 只解析一次（两个子键共享）");
   assert.equal(missQueries.length, 1, "未命中 CLSID 也解析一次以完成判定");
 });
