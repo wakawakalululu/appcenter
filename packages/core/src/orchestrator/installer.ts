@@ -203,7 +203,7 @@ export class InstallOrchestrator {
     this.transition(job, "verifying", { packagePath: downloaded.target });
 
     const installed = await this.deps.inventory.installed();
-    const prior = installed.find((i) => i.displayName === detail.name);
+    const prior = selectPriorInstall(detail.name, installed);
     if (prior && version.minUpgradeFrom && compare(prior.displayVersion, version.minUpgradeFrom) < 0) {
       const removal = await this.runUninstall(prior, version.silent.extraSuccessExitCodes ?? []);
       if (!removal.ok) {
@@ -230,7 +230,7 @@ export class InstallOrchestrator {
         this.transition(job, "failed", { error: "installer exit " + String(result.exitCode), execution: result });
         return;
       }
-      const installedVersion = await this.readInstalledVersion(detail.name);
+      const installedVersion = await this.readInstalledVersion(detail.name, job.version);
       await this.cleanupPackage(downloaded);
       this.transition(job, verdict.requiresReboot ? "needs_reboot" : "succeeded", { execution: result, installedVersion });
     } catch (err) {
@@ -313,11 +313,39 @@ export class InstallOrchestrator {
     }
   }
 
-  /** 装后从已装清单里按显示名回读真实版本号，校验「到底装上了哪个版本」。 */
-  private async readInstalledVersion(displayName: string): Promise<string | undefined> {
+  /** 装后从已装清单按显示名回读真实版本号；歧义时宁可判未命中也不臆测（见 resolveInstalledVersion）。 */
+  private async readInstalledVersion(displayName: string, requestedVersion?: string): Promise<string | undefined> {
     const installed = await this.deps.inventory.installed();
-    return installed.find((i) => i.displayName === displayName)?.displayVersion;
+    return resolveInstalledVersion(displayName, requestedVersion, installed);
   }
+}
+
+/**
+ * 装后版本回读的保守解析。真机测量表明：对当前这台机器，大小写/空白归一化并不能多命中任何一个目录
+ * 应用（0 额），但「Universal CRT Redistributable」这类组件在注册表里存在多条同名不同版本的卸载项——
+ * 旧的 `.find()` 取第一条，会把「到底装上了哪个版本」读成别的实例的版本。因此这里绝不做模糊名匹配，
+ * 且只在能唯一定位时才回读：
+ *  1. 请求版本恰好与某条同名候选一致 → 认定该版本已落地；
+ *  2. 同名候选唯一 → 回读它（注册表可能与请求不同，如实反映实际在装版本）；
+ *  3. 多条不同版本且无法用请求版本定位 → 返回 undefined（判为未命中），而不是返回首条的错误版本。
+ */
+export function resolveInstalledVersion(
+  displayName: string,
+  requestedVersion: string | undefined,
+  installed: readonly InstalledApp[],
+): string | undefined {
+  const candidates = installed.filter((a) => a.displayName === displayName);
+  if (candidates.length === 0) return undefined;
+  if (requestedVersion && candidates.some((a) => a.displayVersion === requestedVersion)) return requestedVersion;
+  if (candidates.length === 1) return candidates[0]?.displayVersion;
+  return undefined;
+}
+
+/** 升级前置检查要的是「本机当前这套到底哪个版本」。同名多条时取版本最高的一条，避免取到旧实例。 */
+export function selectPriorInstall(displayName: string, installed: readonly InstalledApp[]): InstalledApp | undefined {
+  const candidates = installed.filter((a) => a.displayName === displayName);
+  if (candidates.length === 0) return undefined;
+  return candidates.reduce((max, a) => (compare(a.displayVersion, max.displayVersion) > 0 ? a : max));
 }
 
 export function safeName(name: string): string {
