@@ -7,7 +7,7 @@ export interface InventoryCacheData {
   version: 1;
   updatedAt: string;
   apps: InstalledApp[];
-  /** regDir -> 指纹，用于增量刷新时识别新增/变更。 */
+  /** 完整 canonical registryPath（小写）-> 指纹，用于增量刷新时识别新增/变更。 */
   fingerprints: Record<string, string>;
 }
 
@@ -55,7 +55,7 @@ export class InstalledAppCache {
 
   async save(apps: InstalledApp[]): Promise<void> {
     const fingerprints: Record<string, string> = {};
-    for (const app of apps) fingerprints[app.regDir] = fingerprintOf(app);
+    for (const app of apps) fingerprints[pathKey(app)] = fingerprintOf(app);
     const data: InventoryCacheData = { version: 1, updatedAt: new Date().toISOString(), apps, fingerprints };
     this.cache = data;
     await fs.mkdir(this.cacheDir, { recursive: true }).catch(() => undefined);
@@ -69,10 +69,19 @@ function fingerprintOf(app: InstalledApp): string {
   return [app.registryPath, app.displayVersion, app.estimatedSizeKb].join("|");
 }
 
+/** 缓存与指纹以完整 canonical 路径为键，避免同名 regDir 在 64/32/用户根之间互相覆盖。 */
+function pathKey(app: InstalledApp): string {
+  return canonicalHive(app.registryPath).toLowerCase();
+}
+
 /**
- * 带缓存的清单扫描：命中且未过期直接返回（首屏 < 300ms）；
- * 过期则走增量刷新——先 queryChildren 发现子键，再对单个 regDir 做窄查询，避免整棵递归。
- * 冷启动（无缓存）退化为并行全量扫描。
+ * 带缓存的清单扫描：命中且未过期直接返回磁盘结果（真机首屏约 2ms）；
+ * 过期则走增量刷新——与冷启动同样的「三个卸载根各一次递归 queryTree」批处理，
+ * 再与上一轮缓存按指纹合并（复用未变对象、纳入新增、丢弃卸载），并在整体读空时保留最后已知。
+ *
+ * 为什么不用「逐子键 readKey 点查」：真机 141 个应用对应 ~174 个直接子键，
+ * 点查会 fan out 成上百次 reg.exe 进程启动（实测约 6.0s），远慢于每根一次递归的批处理
+ * （实测约 1.3s）；Windows 上 reg.exe 的进程启动开销远高于子树解析开销，故刷新走批处理递归。
  */
 export async function cachedInstalledApps(
   reg: RegClient,
@@ -82,7 +91,7 @@ export async function cachedInstalledApps(
   const existing = await cache.load();
   if (existing && cache.isFresh(existing)) return existing.apps;
   if (existing) {
-    const merged = await incrementalRefresh(reg, options);
+    const merged = await incrementalRefresh(reg, options, existing);
     await cache.save(merged);
     return merged;
   }
@@ -91,30 +100,51 @@ export async function cachedInstalledApps(
   return fresh;
 }
 
-async function incrementalRefresh(reg: RegClient, options: ScanOptions): Promise<InstalledApp[]> {
+/**
+ * 增量刷新：一次批处理重扫（每根一次递归，与 scanInstalledApps 同成本）后与旧缓存合并——
+ * 指纹未变沿用缓存对象、变更取新值、消失即视为卸载、全部读空则判定为瞬时失败保留原清单。
+ */
+async function incrementalRefresh(
+  reg: RegClient,
+  options: ScanOptions,
+  existing: InventoryCacheData,
+): Promise<InstalledApp[]> {
   const wanted = new Set(options.hives ?? ["HKLM", "HKCU"]);
   const roots = UNINSTALL_ROOTS.filter((r) => wanted.has(r.hive));
-  const childSets = await Promise.all(roots.map((r) => reg.queryChildren(r.path)));
+  const scanned = roots.map((r) => canonicalHive(r.path).toLowerCase());
+
+  const cachedByPath = new Map<string, InstalledApp>();
+  for (const app of existing.apps) cachedByPath.set(pathKey(app), app);
+  const priorFp = existing.fingerprints ?? {};
+
+  const keySets = await Promise.all(roots.map((r) => reg.queryTree(r.path)));
+  let anyRead = false;
   const collected: InstalledApp[] = [];
-  await Promise.all(
-    roots.map(async (root, index) => {
-      for (const childPath of childSets[index] ?? []) {
-        for (const key of await reg.queryTree(childPath)) {
-          const app = toInstalledApp(key, root.label, root.hive, root.hive === "HKLM");
-          if (!app) continue;
-          if (app.systemComponent && !options.includeSystemComponents) continue;
-          collected.push(app);
-        }
-      }
-    }),
-  );
   const seen = new Set<string>();
-  const deduped: InstalledApp[] = [];
-  for (const app of collected) {
-    const id = canonicalHive(app.registryPath).toLowerCase();
-    if (seen.has(id)) continue;
-    seen.add(id);
-    deduped.push(app);
+  roots.forEach((root, index) => {
+    const keys = keySets[index] ?? [];
+    if (keys.length > 0) anyRead = true;
+    for (const key of keys) {
+      const app = toInstalledApp(key, root.label, root.hive, root.hive === "HKLM");
+      if (!app) continue;
+      if (app.systemComponent && !options.includeSystemComponents) continue;
+      const id = pathKey(app);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const fp = fingerprintOf(app);
+      const cached = cachedByPath.get(id);
+      collected.push(cached && (priorFp[id] ?? fingerprintOf(cached)) === fp ? cached : app);
+    }
+  });
+
+  // 本轮扫描的根全部读空但旧清单非空：视为瞬时整体失败，保留最后已知，绝不让 UI 突然清空。
+  if (!anyRead && existing.apps.length > 0 && scanned.length > 0) return existing.apps;
+
+  // 本轮未扫描的根（如被 hives 过滤掉）原样保留，不误判为已卸载。
+  for (const [key, app] of cachedByPath) {
+    const underScanned = scanned.some((root) => key === root || key.startsWith(root + "\\"));
+    if (!underScanned) collected.push(app);
   }
-  return dedupeInstalled(deduped);
+
+  return dedupeInstalled(collected);
 }

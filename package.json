@@ -12,6 +12,7 @@
     "app": "node --experimental-transform-types packages/cli/src/main.ts",
     "ui": "node --experimental-transform-types packages/app/src/main.ts",
     "smoke": "node --experimental-transform-types scripts/smoke.mts",
+    "verify:inventory": "node --experimental-transform-types scripts/verify-inventory-refresh.mts",
     "discover": "node --experimental-transform-types scripts/discover-packages.mts",
     "build:real-catalog": "node --experimental-transform-types scripts/build-real-catalog.mts",
     "icons": "node packages/app/scripts/gen-icons.mjs --tauri packages/app/src-tauri/icons",
