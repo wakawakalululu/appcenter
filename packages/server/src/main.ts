@@ -10,7 +10,13 @@ const db = CatalogDb.open(file);
 if (process.argv.includes("--seed")) seedDemo(db);
 
 const server = createApi({ db, packageRoot, adminToken: adminToken || undefined });
-server.listen(port, () => {
-  console.log("appcenter catalog api listening on http://127.0.0.1:" + String(port));
+// listen(port) 不带 host 会绑 0.0.0.0，而旧代码把日志写死成 127.0.0.1 —— 运维据此以为服务只在回环上。
+// 默认只绑回环；确实要对外暴露，显式给 HOST。
+const host = process.env.HOST ?? "127.0.0.1";
+server.listen(port, host, () => {
+  const actual = server.address();
+  const shown = typeof actual === "object" && actual ? actual.address + ":" + String(actual.port) : host + ":" + String(port);
+  console.log("appcenter catalog api listening on http://" + shown);
   console.log("package root: " + packageRoot);
+  if (!adminToken) console.log("警告：ADMIN_TOKEN 未设置，/api/admin/* 一律 403（fail-closed）。需要无鉴权演示请显式传 allowUnauthenticatedAdmin。");
 });

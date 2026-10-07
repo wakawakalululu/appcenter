@@ -15,7 +15,7 @@ import path from "node:path";
 import {
   defaultInstallerRoots,
   discoverPackages,
-  localFileDownloader,
+  createLocalFileDownloader,
   packageToCatalogApp,
   scanInstalledApps,
   LocalRepo,
@@ -156,7 +156,9 @@ async function main(): Promise<void> {
   console.log("\n== 镜像安装包到本地仓库 ==");
   const apps = await Promise.all(withHash.map(async ({ pkg, sha256 }) => packageToCatalogApp(pkg, sha256)));
   const categories = (await api("GET", "/api/categories").then((r) => r.json)) as Category[] | null;
-  const repo = new LocalRepo({ downloader: localFileDownloader, root: REPO_ROOT, verify: "size" });
+  // 来源白名单就用发现阶段认下的那几个根：目录里的 file:// 只能指向它们之内，
+  // 否则一条被污染的清单就能把本机任意文件拷进镜像再随 manifest.json 外泄。
+  const repo = new LocalRepo({ downloader: createLocalFileDownloader(roots.map((root) => root.dir)), root: REPO_ROOT, verify: "size" });
   const syncReport = await repo.sync({ apps, categories: categories ?? [FALLBACK_CATEGORY], allVersions: false });
   console.log(`镜像：${syncReport.saved.length} 新存，${syncReport.cached.length} 已缓存，${syncReport.failed.length} 失败`);
   console.log(`本地仓库占用：${Math.round(syncReport.totalBytes / 1048576)}MB，用时 ${syncReport.durationMs}ms`);

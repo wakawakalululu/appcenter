@@ -26,9 +26,16 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # 单一入口：typecheck → 全部单测/集成 → smoke（真注册表扫描 + CLI IPC）。
+      # 分步跑而不是单一入口，让每段在 CI 日志里各自可见、可定位。
       # 必须用 Windows runner：注册表清单、GDI+ 图标、WinForms 托盘都是 Windows 专属。
-      - run: npm run ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Emoji baseline（基线：零 emoji，UI 图标一律内联 SVG）
+        run: npm run check:emoji
+      - name: Unit & integration tests
+        run: npm test
+      - name: End-to-end smoke (real registry scan + CLI IPC)
+        run: npm run smoke
 
   demo:
     name: demo 启动 · UI 截图产物
@@ -58,3 +65,4 @@ jobs:
           name: ui-screenshots
           path: .shots/*.png
           if-no-files-found: error
+          retention-days: 14

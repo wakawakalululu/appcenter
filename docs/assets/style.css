@@ -168,3 +168,45 @@ footer.site {
   margin-top: 40px;
 }
 footer.site .wrap { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+
+/* ---------- 截图与画廊（对标专业项目首页的“产品先行”） ---------- */
+.hero-shot { margin: 34px 0 0; }
+.hero-shot img {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 60px rgb(0 0 0 / 22%);
+  display: block;
+}
+.hero-shot figcaption, .gallery figcaption {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 8px;
+  text-align: center;
+}
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-top: 22px;
+}
+.gallery figure { margin: 0; }
+.gallery img {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: block;
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+.gallery img:hover { transform: translateY(-3px); box-shadow: 0 12px 30px rgb(0 0 0 / 18%); }
+
+/* ---------- mermaid 图容器 ---------- */
+pre.mermaid {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+  margin: 14px 0 22px;
+  text-align: center;
+  overflow-x: auto;
+}

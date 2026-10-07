@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AppCenter · 企业应用中心引擎</title>
 <meta name="description" content="AppCenter：企业「应用中心 / 软件商店」客户端引擎 + 目录服务端，开源实现。">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
@@ -39,6 +40,16 @@
       <a class="btn" href="architecture.html">阅读架构</a>
       <a class="btn" href="rpc.html">查看 RPC 协议</a>
     </div>
+    <figure class="hero-shot">
+      <img src="assets/screenshots/home.png" alt="应用中心首页（fresh 皮肤，1237×762）" loading="eager">
+      <figcaption>独立桌面应用窗口（<code>npm run desktop</code>）内的首页，fresh 皮肤 1237×762 实拍。</figcaption>
+    </figure>
+    <div class="gallery">
+      <figure><img src="assets/screenshots/desktop-window.png" alt="桌面应用窗口" loading="lazy"><figcaption>桌面窗口与品牌图标</figcaption></figure>
+      <figure><img src="assets/screenshots/categories.png" alt="分类视图" loading="lazy"><figcaption>分类：左树 + 卡格</figcaption></figure>
+      <figure><img src="assets/screenshots/settings.png" alt="设置与本地仓库" loading="lazy"><figcaption>设置与本地仓库</figcaption></figure>
+      <figure><img src="assets/screenshots/click-app-main.png" alt="应用详情抽屉" loading="lazy"><figcaption>应用详情抽屉</figcaption></figure>
+    </div>
   </section>
 </div>
 
@@ -52,6 +63,7 @@
         <li><a href="#packages">包结构</a></li>
         <li><a href="#quickstart">快速开始</a></li>
         <li><a href="#design">设计原则</a></li>
+        <li><a href="#benchmark">设计对标</a></li>
         <li><a href="#status">完成度</a></li>
       </ul>
     </aside>
@@ -119,6 +131,9 @@ node --experimental-transform-types packages/server/src/main.ts --seed
 node --experimental-transform-types packages/cli/src/main.ts search wps
 node --experimental-transform-types packages/cli/src/main.ts demo
 
+# 桌面应用窗口（独立窗口 + 任务栏图标，非浏览器标签页）
+npm run desktop
+
 # 校验
 npm run typecheck
 npm test</code></pre>
@@ -139,15 +154,29 @@ npm test</code></pre>
         <li><strong>自升级可回滚。</strong>暂存校验通过后写 pending 标记，启动时未 commit 即回滚。</li>
       </ol>
 
+      <h2 id="benchmark">设计对标</h2>
+      <p>界面与文档参照了这些专业项目的公开做法（只借鉴结构与交互模式，不复制素材）：</p>
+      <table>
+        <thead><tr><th>对标</th><th>借鉴点</th><th>落点</th></tr></thead>
+        <tbody>
+          <tr><td>VS Code 的文档结构</td><td>徽章 → 定位 → 截图 → 架构图 → 快速开始 → 设计原则</td><td>本站与 README 章节编排</td></tr>
+          <tr><td>Microsoft Store 类客户端</td><td>首页三层结构、按钮三态语义（打开 / 一键安装 / 手动安装）</td><td>首页布局与按钮系统</td></tr>
+          <tr><td>Ant Design 的 token 化</td><td>皮肤 = token 覆盖表，间距/圆角/字号全走 CSS 变量</td><td><code>theme/skin.ts</code> 与 <code>app.css</code></td></tr>
+          <tr><td>Tauri 的轻量分发</td><td>不内置 Electron，同一 UI 由 WebView/Tauri/WinForms 任一宿主包裹</td><td><code>packages/app</code> 三层宿主路线</td></tr>
+          <tr><td>Homebrew / winget 的清单思想</td><td>安装包 + sha256 + 元数据的自描述 manifest</td><td><code>localrepo/</code> 与 <a href="https://github.com/wakawakalululu/appcenter/blob/main/LOCAL-REPO.md">LOCAL-REPO.md</a></td></tr>
+        </tbody>
+      </table>
+
       <h2 id="status">完成度</h2>
-      <p>当前共 <strong>127 项测试</strong>全部通过，类型检查干净。</p>
+      <p>当前共 <strong>141 项测试</strong>全部通过，类型检查干净，emoji 基线（零 emoji、UI 图标全 SVG）由 CI 强制。</p>
       <table>
         <thead><tr><th>已交付</th><th>待真实环境验证</th></tr></thead>
         <tbody>
           <tr>
             <td>目录 / 搜索 / 评分 / 清单缓存 / 残留扫描 / 清理与备份撤销 / 断点续传 /
-                多类型执行计划 / 装后回读 / 批量编排 / 升级 / 自升级 / 审批通知 /
-                皮肤 / 窗口 / 托盘 / 自启开关 / 服务端鉴权与审计 / 机群资产心跳与离线判定 / 桌面 UI</td>
+                多类型执行计划（静默 + 手动）/ 装后回读 / 批量编排 / 升级 / 自升级 / 审批通知 /
+                皮肤 / 窗口 / 托盘 / 自启开关 / 服务端鉴权与审计 / 机群资产心跳与离线判定 /
+                本地应用包仓库（manifest 清单）/ 桌面应用窗口 / 桌面 UI</td>
             <td>打包为可双击安装产物（Tauri 配置已就位）、MSIX 与归档安装的实机验证、
                 真实安装包的端到端升级演练、桌面会话下的自启与托盘验收</td>
           </tr>

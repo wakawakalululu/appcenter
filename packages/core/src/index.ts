@@ -2,6 +2,7 @@ export * from "./catalog/types.ts";
 export * from "./catalog/search.ts";
 export * from "./catalog/rating.ts";
 export * from "./util/semver.ts";
+export * from "./util/paths.ts";
 export * from "./inventory/registry.ts";
 export * from "./inventory/inventory.ts";
 export * from "./inventory/cache.ts";

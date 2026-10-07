@@ -113,6 +113,20 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
 export interface ExtrasContext {
   db: DatabaseSync;
   requireAdmin: (req: IncomingMessage) => boolean;
+  /** 调用者身份；null 表示匿名（无凭据部署，维持旧行为）。 */
+  principal: (req: IncomingMessage) => { userId: string; role: string } | null;
+}
+
+/**
+ * 通知按申请人取，但 applicant 一直是客户端自报的——任何人都能点名读别人的审批流水
+ * （里面带 reason 文本）。带令牌的调用者一律收口到「只能看自己」，admin 例外；
+ * 匿名调用维持原样，因为整套部署没配身份时没有更弱的假设可退。
+ */
+function scopedApplicant(ctx: ExtrasContext, req: IncomingMessage, requested: string): { applicant: string } | { denied: string } {
+  const who = ctx.principal(req);
+  if (!who || who.role === "admin") return { applicant: requested };
+  if (requested && requested !== who.userId) return { denied: "applicant mismatch" };
+  return { applicant: who.userId };
 }
 
 export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
@@ -185,13 +199,20 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
   }
 
   if (segments[0] === "api" && segments[1] === "notifications" && method === "GET") {
-    const applicant = url.searchParams.get("applicant") ?? "";
-    const rows = ctx.db.prepare("SELECT id, app_id, app_version, status, reason, created_at, notified_done FROM approvals WHERE applicant = ? AND status IN ('pending','approved','granted','rejected') ORDER BY created_at DESC").all(applicant) as Record<string, unknown>[];
+    const scoped = scopedApplicant(ctx, req, url.searchParams.get("applicant") ?? "");
+    if ("denied" in scoped) return send(res, 403, { error: scoped.denied }), true;
+    const rows = ctx.db.prepare("SELECT id, app_id, app_version, status, reason, created_at, notified_done FROM approvals WHERE applicant = ? AND status IN ('pending','approved','granted','rejected') ORDER BY created_at DESC").all(scoped.applicant) as Record<string, unknown>[];
     send(res, 200, rows.map((r) => ({ id: String(r.id), appId: String(r.app_id), appVersion: String(r.app_version), status: String(r.status), reason: String(r.reason), createdAt: String(r.created_at), done: Number(r.notified_done) === 1 })));
     return true;
   }
   if (segments[0] === "api" && segments[1] === "notifications" && segments[3] === "done" && method === "POST") {
     const id = decodeSegment(segments[2]);
+    const who = ctx.principal(req);
+    if (who && who.role !== "admin") {
+      const owner = ctx.db.prepare("SELECT applicant FROM approvals WHERE id = ?").get(id) as { applicant: string } | undefined;
+      if (!owner) return send(res, 404, { error: "no such notification" }), true;
+      if (owner.applicant !== who.userId) return send(res, 403, { error: "not your notification" }), true;
+    }
     const result = ctx.db.prepare("UPDATE approvals SET notified_done = 1 WHERE id = ?").run(id);
     send(res, Number(result.changes ?? 0) > 0 ? 200 : 404, { ok: Number(result.changes ?? 0) > 0 });
     return true;

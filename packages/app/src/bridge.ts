@@ -85,6 +85,33 @@ function faviconSvg(): string {
   );
 }
 
+/**
+ * 浏览器来源闸门。桥只绑回环，但「只绑回环」挡不住 CSRF：网页发 `POST` + `text/plain`
+ * 属于 CORS 简单请求，不触发预检就能直达 dispatch（实测可跨源把皮肤切掉）。
+ * 规则：带 Origin / Sec-Fetch-Site 的按浏览器请求处理，必须同源；两者都不带的视为本机原生
+ * 客户端（CLI 与托盘宿主用 application/json 且不发 Origin），保持放行。
+ */
+export function browserRequestBlocked(req: IncomingMessage): string | null {
+  const site = req.headers["sec-fetch-site"];
+  if (typeof site === "string" && site !== "same-origin" && site !== "none") return "sec-fetch-site=" + site;
+  const origin = req.headers.origin;
+  if (origin === undefined || origin === "") return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return "origin-unparseable";
+  }
+  if (parsed.host !== (req.headers.host ?? "")) return "cross-origin:" + origin;
+  return null;
+}
+
+/** 只接受 JSON 请求体：把「简单请求」这条路单独堵死，与来源检查互为冗余。 */
+function isJsonRequest(req: IncomingMessage): boolean {
+  const type = String(req.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  return type === "application/json" || type.endsWith("+json");
+}
+
 export function createBridge(options: BridgeOptions): Server {
   const { facade, webRoot } = options;
   const clients = new Set<ServerResponse>();
@@ -102,6 +129,11 @@ export function createBridge(options: BridgeOptions): Server {
   const server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? "/", "http://localhost");
+      // /rpc 改状态、/events 泄本地状态，两者都要过来源闸门；静态资源不设闸。
+      if (url.pathname === "/rpc" || url.pathname === "/events") {
+        const blocked = browserRequestBlocked(req);
+        if (blocked) return send(res, 403, { ok: false, error: "blocked-by-origin-policy: " + blocked });
+      }
       if (url.pathname === "/events") {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
         res.write("event: hello\ndata: " + JSON.stringify({ tray: facade.trayView(), skins: facade.skins.list(), windows: facade.windowList() }) + "\n\n");
@@ -109,7 +141,11 @@ export function createBridge(options: BridgeOptions): Server {
         req.on("close", () => clients.delete(res));
         return;
       }
-      if (url.pathname === "/rpc" && req.method === "POST") {
+      if (url.pathname === "/rpc") {
+        // 不回任何 CORS 头，预检在浏览器侧必然失败；这里显式拒绝，避免落到静态资源分支变成 404。
+        if (req.method === "OPTIONS") return send(res, 405, { ok: false, error: "preflight-unsupported" });
+        if (req.method !== "POST") return send(res, 405, { ok: false, error: "method-not-allowed" });
+        if (!isJsonRequest(req)) return send(res, 415, { ok: false, error: "content-type-must-be-application-json" });
         const call = await readJson<RpcCall>(req);
         const result = await dispatch(facade, call.method, call.params ?? {});
         return send(res, result.ok ? 200 : 400, result);
@@ -177,7 +213,12 @@ export async function startUi(options: StartOptions): Promise<{ server: Server; 
     new RecordingWindowHost(),
   );
   const server = createBridge({ facade, webRoot: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web") });
-  await new Promise<void>((resolve) => server.listen(options.port ?? 8080, "127.0.0.1", resolve));
+  // 端口被占时 listen 只发 'error' 事件；不挂监听就是未处理异常直接打死宿主进程。
+  // 桌面壳与演示入口要的是「起不来就抛错」，由调用方决定怎么退。
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", (err) => reject(err));
+    server.listen(options.port ?? 8080, "127.0.0.1", () => resolve());
+  });
   const port = (server.address() as AddressInfo).port;
   return { server, url: "http://127.0.0.1:" + String(port), facade };
 }

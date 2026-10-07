@@ -7,7 +7,7 @@ import path from "node:path";
 import type { AppDetail, AppSummary, AppVersion, Category, RatingInput, SilentSpec } from "@appcenter/core";
 import { toDistribution } from "@appcenter/core";
 import { handleExtras } from "./extras.ts";
-import { authorize, createUser, ensureAuthSchema, issueToken, recordAudit, visibleAppIds } from "./auth.ts";
+import { authorize, createUser, ensureAuthSchema, issueToken, recordAudit, visibleAppIds, type Principal } from "./auth.ts";
 
 const SCHEMA: string[] = [
   "CREATE TABLE IF NOT EXISTS categories (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, sort_order INTEGER NOT NULL DEFAULT 0)",
@@ -323,15 +323,26 @@ export interface ServerOptions {
   /** 安装包存放目录，/dl 路径从这里取文件。 */
   packageRoot: string;
   adminToken?: string;
+  /**
+   * 无 adminToken 时是否仍放开管理端点。默认否（fail-closed）。
+   * 只给本地演示用；生产要么设 ADMIN_TOKEN，要么别开这个开关。
+   */
+  allowUnauthenticatedAdmin?: boolean;
 }
 
 export function createApi(options: ServerOptions) {
   const { db, packageRoot } = options;
   ensureAuthSchema(db.raw());
   const requireAdmin = (req: IncomingMessage): boolean => {
-    if (!options.adminToken) return true;
+    // 过去这里是 `if (!options.adminToken) return true`：只要部署时忘了 ADMIN_TOKEN，
+    // 运营位/捆绑/机群这些写路由就对任何能连上端口的人敞开，等于把「没配凭据」当成「谁都是管理员」。
+    // 现在缺凭据就拒绝；确实要跑无鉴权演示的，显式传 allowUnauthenticatedAdmin。
+    if (!options.adminToken) return options.allowUnauthenticatedAdmin === true;
     return authorize(req, { db: db.raw(), adminToken: options.adminToken, requiredRole: "admin" }) !== null;
   };
+  /** 调用者身份：带了合法 Bearer 才有；null 表示匿名（旧演示模式）。 */
+  const principalOf = (req: IncomingMessage): Principal | null =>
+    options.adminToken ? authorize(req, { db: db.raw(), adminToken: options.adminToken }) : null;
 
   return createServer((req, res) => {
     void (async () => {
@@ -478,7 +489,7 @@ export function createApi(options: ServerOptions) {
         recordAudit(db.raw(), "admin", "self_update.publish", String(body.version ?? ""));
         return json(res, 201, { ok: true });
       }
-      if (await handleExtras({ db: db.raw(), requireAdmin }, req, res, url)) return undefined;
+      if (await handleExtras({ db: db.raw(), requireAdmin, principal: principalOf }, req, res, url)) return undefined;
       return json(res, 404, { error: "no route " + method + " " + url.pathname });
     })().catch((err: unknown) => json(res, 500, { error: err instanceof Error ? err.message : String(err) }));
   });

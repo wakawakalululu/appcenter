@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>架构 · AppCenter</title>
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/style.css">
+<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs"; mermaid.initialize({ startOnLoad: true, theme: "neutral" });</script>
 </head>
 <body>
 <header class="site">
@@ -25,6 +27,7 @@
     <aside class="toc">
       <h4>本页</h4>
       <ul>
+        <li><a href="#overview">总览图</a></li>
         <li><a href="#layers">分层</a></li>
         <li><a href="#ports">可注入端口</a></li>
         <li><a href="#inventory">清单读取与缓存</a></li>
@@ -37,6 +40,52 @@
     <div>
       <h1 style="font-size:32px;margin:34px 0 6px;">架构</h1>
       <p style="color:var(--muted);">一份纯逻辑引擎，外面套可替换的宿主与服务端。</p>
+
+      <h2 id="overview">总览图</h2>
+      <pre class="mermaid">
+flowchart TB
+  subgraph HOST["UI 宿主（可替换）"]
+    WEB["Web UI<br/>packages/app/web"]
+    TRAY["WinForms 托盘<br/>tray.ts"]
+    TAURI["Tauri 壳<br/>src-tauri"]
+  end
+  subgraph CORE["@appcenter/core 领域引擎"]
+    F["facade.ts 统一入口"]
+    F --> CAT["catalog"] & INV["inventory"] & LEFT["leftover"] & DL["download"] & ORCH["orchestrator"] & UP["upgrader/selfupdate"] & LR["localrepo"]
+  end
+  subgraph SRV["packages/server"]
+    API["HTTP API"] --- DB[("SQLite")]
+    PKG["/dl Range 下载"]
+  end
+  WEB -- "POST /rpc · SSE /events" --> F
+  TRAY -- "ui.tray / trayAction" --> F
+  TAURI --> F
+  ORCH --> DL --> PKG
+  LR --> DL
+  CAT -- "拉取目录" --> API
+</pre>
+      <p>一条安装链路的状态机（UI 经 SSE 实时收到每次迁移）：</p>
+      <pre class="mermaid">
+flowchart LR
+  Q[queued] --> D[downloading] --> V[verifying] --> I[installing]
+  I --> S[succeeded]
+  I --> R[needs_reboot]
+  I --> X[failed]
+  D -.需审批.-> A[awaiting_approval] -.凭证.-> D
+</pre>
+      <p>界面按钮语义由引擎联表判定，前端不猜状态：</p>
+      <pre class="mermaid">
+flowchart TB
+  E["CatalogEntry"] --> Q1{"已装？"}
+  Q1 -->|"否"| Q2{"需审批且无凭证？"}
+  Q2 -->|"是"| A2["描边「申请」"]
+  Q2 -->|"否"| Q3{"installMode"}
+  Q3 -->|"manual"| M["描边「手动安装」"]
+  Q3 -->|"silent"| SI["实心「一键安装」"]
+  Q1 -->|"是"| Q4{"可升级？"}
+  Q4 -->|"是"| U["实心「升级」"]
+  Q4 -->|"否"| O["实心「打开」"]
+</pre>
 
       <h2 id="layers">分层</h2>
       <table>

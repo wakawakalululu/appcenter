@@ -75,6 +75,41 @@ flowchart LR
   D -.需审批.-> A[awaiting_approval] -.凭证.-> D
 ```
 
+目录 × 本机清单联表后，界面按钮的语义完全由引擎判定（前端不猜状态）：
+
+```mermaid
+flowchart TB
+  E["CatalogEntry（目录条目 × 注册表联表）"] --> Q1{"本机已装同名应用？"}
+  Q1 -->|"否"| Q2{"requiresApproval 且无有效凭证？"}
+  Q2 -->|"是"| A2["needs-approval → 描边「申请」"]
+  Q2 -->|"否"| Q3{"installMode？"}
+  Q3 -->|"manual"| M["描边「手动安装」<br/>执行计划剥掉静默参数"]
+  Q3 -->|"silent"| SI["实心「一键安装 ▾」<br/>多版本带下拉"]
+  Q1 -->|"是"| Q4{"目录版本更高？"}
+  Q4 -->|"是"| U["实心「升级」"]
+  Q4 -->|"否"| O["实心「打开」"]
+```
+
+核心引擎的模块依赖（都经 `facade.ts` 单入口暴露，UI/CLI 不直接触达内部）：
+
+```mermaid
+flowchart TB
+  F["facade.ts"]
+  F --> CAT["catalog<br/>目录/搜索/评分/视图"]
+  F --> INV["inventory<br/>注册表清单/图标/缓存"]
+  F --> LEFT["leftover<br/>残留扫描/清理/备份"]
+  F --> DL["download<br/>断点续传"]
+  F --> ORCH["orchestrator<br/>安装状态机"]
+  F --> UP["upgrader / selfupdate"]
+  F --> LR["localrepo<br/>发现与本地仓库"]
+  F --> THEME["theme / windows / tray / approval / runtime"]
+  ORCH --> DL
+  ORCH --> RUN["runner<br/>MSI/NSIS/Inno/MSIX/归档"]
+  ORCH --> INV
+  UP --> DL
+  LR --> DL
+```
+
 ## 目录结构
 
 ```
@@ -230,11 +265,12 @@ flowchart LR
 | 阶段 | 命令 | 内容 |
 | --- | --- | --- |
 | 静态检查 | `npm run typecheck` | `tsc -p tsconfig.json` 全仓严格检查 |
-| 单测/集成 | `npm test` | 137 项：引擎、服务端、bridge、图标、端到端 |
+| **Emoji 基线** | `npm run check:emoji` | 基线：全仓文本源零 emoji，Web UI 零字符图形图标（一律内联 SVG），违规即红 |
+| 单测/集成 | `npm test` | 222 项：引擎、服务端、bridge、图标、端到端 |
 | 冒烟 | `npm run smoke` | 真机注册表清单扫描 + CLI IPC 链路 |
 | 演示与截图 | `npm run demo` / `npm run shots` | 本地复现 CI 的截图产物（fresh 皮肤 1237×762） |
 
-两个 job 都有 `timeout-minutes` 上限，防止挂起的测试拖穿额度；截图产物随每次 CI 可下载比对。
+两个 job 都有 `timeout-minutes` 上限，防止挂起的测试拖穿额度；截图产物随每次 CI 可下载比对（保留 14 天）。
 
 ## 文档与站点
 

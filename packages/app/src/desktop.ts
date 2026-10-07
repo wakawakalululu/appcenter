@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { access, mkdtemp } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -82,67 +83,144 @@ export interface DesktopOptions {
   catalogPort?: number;
   uiPort?: number;
   shellPath?: string;
+  /** 覆盖目录服务入口（测试用假服务）；默认 packages/server/src/main.ts。 */
+  serverEntry?: string;
+  /** 直接给定工作区就跳过 PowerShell 探测（非 Windows、或要固定几何时）。 */
+  workarea?: WorkareaRect;
+  /** 追加给目录服务子进程的环境变量。 */
+  envExtras?: Record<string, string>;
 }
 
 export interface DesktopSession {
   uiUrl: string;
   shell: ChildProcess | null;
   catalogServer: ChildProcess;
+  /** 本次为浏览器建的隔离 profile 目录；close() 负责回收，别把它们留在 %TEMP%。 */
+  profileDirs: string[];
+  close(): Promise<void>;
+}
+
+/**
+ * TCP 层就绪探测。旧实现是「等 stdout 里出现 listening 字样」——那是把日志措辞当协议用：
+ * 措辞一改、输出被缓冲、或分块切在单词中间，就绪判定就假阴性；反过来服务没起来但
+ * 别的进程占着这个端口时又成了假阳性。端口能不能连上才是事实。
+ */
+export async function waitForPort(port: number, timeoutMs = 15000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const open = await new Promise<boolean>((resolve) => {
+      const socket = net.connect(port, "127.0.0.1");
+      const done = (value: boolean): void => {
+        socket.removeAllListeners();
+        socket.destroy();
+        resolve(value);
+      };
+      socket.setTimeout(500, () => done(false));
+      socket.once("connect", () => done(true));
+      socket.once("error", () => done(false));
+    });
+    if (open) return true;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
+function exists(file: string): Promise<boolean> {
+  return access(file).then(() => true).catch(() => false);
 }
 
 /** 起目录服务 + 引擎 + 桥，再开独立桌面窗口；窗口关闭即整场退出（托盘常驻走 tray.ts）。 */
 export async function runDesktop(options: DesktopOptions = {}): Promise<DesktopSession> {
   const catalogPort = options.catalogPort ?? Number(process.env.CATALOG_PORT ?? 7991);
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const serverMain = path.join(here, "..", "..", "server", "src", "main.ts");
+  const serverEntry = options.serverEntry ?? path.join(here, "..", "..", "server", "src", "main.ts");
+  const profileDirs: string[] = [];
+  let catalogServer: ChildProcess | undefined;
+  let ui: Awaited<ReturnType<typeof startUi>> | undefined;
 
-  const catalogServer = spawn(
-    process.execPath,
-    ["--experimental-transform-types", serverMain, "--seed"],
-    {
-      env: {
-        ...process.env,
-        CATALOG_PORT: String(catalogPort),
-        DB_FILE: process.env.DB_FILE ?? "smoke-catalog.db",
-        PACKAGE_ROOT: process.env.PACKAGE_ROOT ?? "smoke-packages",
+  /** 失败与正常退出共用同一个回收口：先关连接再删目录，任何一步都不许留下活口。 */
+  const teardown = async (): Promise<void> => {
+    const child = catalogServer;
+    if (child && child.exitCode === null && child.signalCode === null) child.kill();
+    const bridge = ui;
+    if (bridge) {
+      bridge.server.closeAllConnections();
+      await new Promise<void>((resolve) => bridge.server.close(() => resolve()));
+    }
+    for (const dir of profileDirs) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  };
+
+  try {
+    const dbFile = process.env.DB_FILE ?? "smoke-catalog.db";
+    // desktop 会带 --seed 起服务。若 DB_FILE 指向一个已存在的库（真目录工作流的常态），
+    // seed 就是往真库里灌演示应用并覆写体积/校验值——库已存在就不再 seed。
+    const shouldSeed = (await exists(dbFile)) ? [] : ["--seed"];
+
+    // spawn 失败（ENOENT/EACCES）在本机 Node 上是**异步 'error' 事件**，try/catch 包不住；
+    // 没有监听就是 Unhandled 'error' → 宿主进程直接 exit 1。所以先挂监听，再用事件驱动判定。
+    catalogServer = spawn(
+      process.execPath,
+      ["--experimental-transform-types", serverEntry, ...shouldSeed],
+      {
+        env: {
+          ...process.env,
+          ...options.envExtras,
+          CATALOG_PORT: String(catalogPort),
+          DB_FILE: dbFile,
+          PACKAGE_ROOT: process.env.PACKAGE_ROOT ?? "smoke-packages",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
       },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  catalogServer.stderr?.on("data", (chunk: Buffer) => process.stderr.write("[server] " + chunk));
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("catalog server did not listen in 15s")), 15000);
-    catalogServer.stdout?.on("data", (chunk: Buffer) => {
-      process.stdout.write("[server] " + chunk);
-      if (String(chunk).includes("listening")) {
-        clearTimeout(timer);
-        resolve();
-      }
+    );
+    catalogServer.stdout?.on("data", (chunk: Buffer) => process.stdout.write("[server] " + chunk));
+    catalogServer.stderr?.on("data", (chunk: Buffer) => process.stderr.write("[server] " + chunk));
+
+    let earlyFailure: Error | null = null;
+    const child = catalogServer as ChildProcess;
+    const watchDeath = new Promise<"failed">((resolve) => {
+      child.on("error", (err) => {
+        earlyFailure = new Error("catalog server spawn failed: " + err.message);
+        resolve("failed");
+      });
+      child.on("exit", (code) => {
+        earlyFailure = new Error("catalog server exited early: " + String(code));
+        resolve("failed");
+      });
     });
-    catalogServer.on("exit", (code) => reject(new Error("catalog server exited early: " + String(code))));
-  });
+    const outcome = await Promise.race([waitForPort(catalogPort).then((ready) => (ready ? "ready" : "timeout")), watchDeath]);
+    if (outcome !== "ready") throw earlyFailure ?? new Error("catalog server did not listen on " + String(catalogPort) + " within 15s");
 
-  const ui = await startUi({
-    serverUrl: "http://127.0.0.1:" + String(catalogPort),
-    userId: process.env.APPCENTER_USER ?? "desktop",
-    dataDir: process.env.APPCENTER_DATA ?? path.join(tmpdir(), "appcenter-desktop"),
-    appVersion: "1.0.0",
-    port: options.uiPort ?? Number(process.env.UI_PORT ?? 0),
-  });
-  console.log("ui bridge on " + ui.url);
+    ui = await startUi({
+      serverUrl: "http://127.0.0.1:" + String(catalogPort),
+      userId: process.env.APPCENTER_USER ?? "desktop",
+      dataDir: process.env.APPCENTER_DATA ?? path.join(tmpdir(), "appcenter-desktop"),
+      appVersion: "1.0.0",
+      port: options.uiPort ?? Number(process.env.UI_PORT ?? 0),
+    });
+    console.log("ui bridge on " + ui.url);
 
-  const workarea = await getWorkarea();
-  const geometry = geometryFor(workarea);
-  const profileDir = await mkdtemp(path.join(tmpdir(), "appcenter-shell-"));
-  const target = ui.url + "/?shell=app#/home";
-  const shellPath = options.shellPath ?? (await findShellExecutable(shellCandidates())) ?? "";
-  if (!shellPath) {
-    console.log("no Edge/Chrome found — open " + target + " manually");
-    return { uiUrl: target, shell: null, catalogServer };
+    const workarea = options.workarea ?? (await getWorkarea());
+    const geometry = geometryFor(workarea);
+    const profileDir = await mkdtemp(path.join(tmpdir(), "appcenter-shell-"));
+    profileDirs.push(profileDir);
+    const target = ui.url + "/?shell=app#/home";
+    const shellPath = options.shellPath ?? (await findShellExecutable(shellCandidates())) ?? "";
+    if (!shellPath) {
+      console.log("no Edge/Chrome found — open " + target + " manually");
+      return { uiUrl: target, shell: null, catalogServer, profileDirs, close: teardown };
+    }
+    const shell = spawn(shellPath, buildShellArgs(target, geometry, profileDir), { detached: false, stdio: "ignore" });
+    // 浏览器启动失败同样只发 'error' 事件；不挂监听就是猝死宿主。
+    shell.on("error", (err) => {
+      console.log("desktop window failed: " + err.message + " — open " + target + " manually");
+    });
+    console.log("desktop window: " + shellPath + " " + JSON.stringify(geometry));
+    return { uiUrl: target, shell, catalogServer, profileDirs, close: teardown };
+  } catch (err) {
+    // 到这一步之前起的任何东西都得收掉，否则就是一次失败换一个占着端口的孤儿进程。
+    await teardown();
+    throw err;
   }
-  const shell = spawn(shellPath, buildShellArgs(target, geometry, profileDir), { detached: false, stdio: "ignore" });
-  console.log("desktop window: " + shellPath + " " + JSON.stringify(geometry));
-  return { uiUrl: target, shell, catalogServer };
 }
 
 /** 常见安装位置的探测顺序；CHROME_PATH/SHELL_PATH 可覆盖。 */
@@ -158,10 +236,15 @@ export function shellCandidates(): (string | undefined)[] {
 
 const invokedDirectly = process.argv[1] !== undefined && process.argv[1].replace(/\\/g, "/").endsWith("desktop.ts");
 if (invokedDirectly) {
-  const session = await runDesktop();
+  const session = await runDesktop().catch((err: unknown) => {
+    console.error("desktop failed: " + (err instanceof Error ? err.message : String(err)));
+    process.exit(1);
+  });
+  let closing = false;
   const quit = (): void => {
-    session.catalogServer.kill();
-    process.exit(0);
+    if (closing || !session) return;
+    closing = true;
+    void session.close().finally(() => process.exit(0));
   };
   if (session.shell) session.shell.on("exit", quit);
   else quit();

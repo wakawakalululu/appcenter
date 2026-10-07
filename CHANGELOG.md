@@ -36,6 +36,12 @@
 
 ### 宿主与工具
 
+- **Emoji 基线（CI 强制）**：`scripts/check-emoji.mjs` + `npm run check:emoji`——全仓文本源零 emoji，Web UI 源额外禁止字符图形当图标（星形、叉形、等号、放大镜、方框、下载符等字符码点在禁列，箭头 U+2192 保留给文案）；基线当前为零违规，CI verify 阶段跑红即拒合。
+- UI 图标全面内联 SVG 化：顶栏返回/菜单/下载/最小化/最大化/关闭、搜索放大镜、空态图形、评分星标（实心/描边两态）全部改为矢量图标，跨平台渲染一致且可随皮肤取色。
+- Pages 站点专业化：首页嵌入实拍截图与画廊、新增「设计对标」章节（VS Code 文档结构 / Microsoft Store 布局 / Ant Design token 化 / Tauri 轻量分发 / Homebrew 清单思想）、测试数与已交付能力刷新（141 项→218 项随并行工作流推进）、全站 favicon；架构页以 Mermaid 嵌入总览图/安装状态机/按钮决策树。
+- CI：verify 阶段新增「Emoji baseline」独立步骤；截图 artifact 增加保留期（14 天）。
+- 桌面壳契约补齐：`waitForPort` TCP 探测替代日志字面匹配、`session.close()` 回收目录服务与浏览器 profile、`serverEntry/workarea/envExtras` 可注入（生命周期测试可注入假服务端）；`npm test` 加 `--test-force-exit` 收口持有 OS 句柄的测试进程。
+
 - 桌面应用窗口（`packages/app/src/desktop.ts`，`npm run desktop`）：一条命令拉起目录服务 + 引擎 + 桥并打开 Edge/Chrome `--app` **独立桌面窗口**——无标签页/地址栏、任务栏独立图标、品牌 favicon 作窗口图标，窗口初始几何取工作区的 60.4% × 66.1%（最小 900×600，居中），独立 user-data-dir 不复用日常浏览器会话；`?shell=app` 时 UI 隐藏自绘窗口控制按钮交给 OS 标题条。作为「网页 → 桌面端」迁移的第 2 层，Tauri（第 3 层）待 Rust 工具链就绪后换壳即可，UI 代码三层同源。
 - bridge 新增 `/favicon.svg` 品牌图标（云 + 购物袋，自绘原创），`index.html` 挂 `<link rel="icon">`。
 - dispatch 新增 `heartbeat.report`、`fleet.summary`（支持 `staleAfterHours`）与 `fleet.detail`，Web 桥与 CLI 同源可用。

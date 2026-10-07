@@ -47,6 +47,18 @@ async function refreshBundleProgress() {
     .join("");
 }
 
+/** 内联 SVG 图标库：UI 里禁止 emoji/字符图形，动态渲染一律取自这里（静态结构里的图标直接写在 index.html）。 */
+const ICONS = {
+  search: '<svg viewBox="0 0 16 16" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.4"/><path d="m13.5 13.5-3.2-3.2"/></svg>',
+  upgrade: '<svg viewBox="0 0 16 16" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3.5M4.5 6.5 8 3l3.5 3.5M3 13.5h10"/></svg>',
+  grid: '<svg viewBox="0 0 16 16" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2"/><rect x="2" y="9" width="5" height="5" rx="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2"/></svg>',
+  download: '<svg viewBox="0 0 16 16" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7M5 7l3 3 3-3M2.5 11v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>',
+  star: '<svg viewBox="0 0 16 16" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.8 9.9 5.6l4.2.6-3 3 .7 4.2L8 11.4l-3.8 2 .7-4.2-3-3 4.2-.6L8 1.8Z"/></svg>',
+};
+
+const STAR_SVG =
+  '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 1.6 9.9 5.5l4.3.6-3.1 3 .7 4.3L8 11.4l-3.8 2 .7-4.3-3.1-3 4.3-.6L8 1.6Z"/></svg>';
+
 /** 检查结果的中文语义，避免把状态机原样丢给用户。 */
 function selfUpdateLabel(result) {
   if (result.state === "available") return "发现 v" + result.version + (result.mandatory ? " · 强制升级，必须完成才能继续使用" : " · 可升级");
@@ -135,8 +147,11 @@ function chips(entry) {
 function stars(distribution) {
   const mean = distribution && distribution.count ? distribution.mean : 0;
   const count = distribution && distribution.count ? distribution.count : 0;
+  // 星标一律 SVG：实心评分星 fill 走 --star，空星只描边。
   let glyph = "";
-  for (let i = 1; i <= 5; i++) glyph += i <= Math.round(mean) ? "★" : "☆";
+  for (let i = 1; i <= 5; i++) {
+    glyph += '<span class="star' + (i <= Math.round(mean) ? " on" : "") + '">' + STAR_SVG + "</span>";
+  }
   return '<span class="stars" aria-label="评分 ' + mean.toFixed(1) + " 分，共 " + String(count) + ' 人评分">' + glyph + "</span> <span class=\"card-sub\">" + mean.toFixed(1) + " · " + String(count) + " 人</span>";
 }
 
@@ -302,7 +317,7 @@ async function hydrate(view) {
     if (view === "settings") await loadSettings();
     // 直接从地址栏进搜索页时给引导，而不是留一块空白。
     if (view === "search" && !el("search").value.trim() && !el("grid-search").children.length) {
-      el("grid-search").innerHTML = emptyState("⌕", "输入关键字开始搜索", "支持软件名、拼音、厂商与标签");
+      el("grid-search").innerHTML = emptyState("search", "输入关键字开始搜索", "支持软件名、拼音、厂商与标签");
       el("search-meta").textContent = "";
     }
   } catch (err) {
@@ -315,7 +330,7 @@ async function loadExclusive() {
   const entries = await rpc("catalog.exclusive");
   el("exclusive-grid").innerHTML = entries.length
     ? entries.map(appCard).join("")
-    : emptyState("★", "暂无专属应用", "管理端为贵单位授权后，应用会出现在这里");
+    : emptyState("star", "暂无专属应用", "管理端为贵单位授权后，应用会出现在这里");
 }
 
 async function loadCategories() {
@@ -334,7 +349,7 @@ async function loadCategories() {
   if (!state.activeCategory) {
     el("grid-category").innerHTML = state.categories.length
       ? state.categories.map(categoryCard).join("")
-      : emptyState("▦", "还没有分类", "服务端上架应用后会按分类自动归类");
+      : emptyState("grid", "还没有分类", "服务端上架应用后会按分类自动归类");
   }
 }
 
@@ -378,7 +393,7 @@ async function doSearch() {
   const entries = await loadView();
   const byId = new Map(entries.map((entry) => [entry.app.id, entry]));
   const merged = hits.map((hit) => byId.get(hit.app.id)).filter(Boolean);
-  el("grid-search").innerHTML = merged.length ? merged.map(appCard).join("") : emptyState("⌕", "没有匹配的软件", "换个说法、拼音或厂商名再试一次");
+  el("grid-search").innerHTML = merged.length ? merged.map(appCard).join("") : emptyState("search", "没有匹配的软件", "换个说法、拼音或厂商名再试一次");
   el("search-meta").textContent = "关键字 " + text + " · " + String(merged.length) + " 个结果" + (hits[0] ? " · 首位命中字段 " + hits[0].matchedOn : "");
   showView("search");
 }
@@ -398,9 +413,9 @@ async function loadInstalled() {
     .join("");
 }
 
-/** 空态占位：这里用纯 CSS 绘制，不引入外部素材。 */
-function emptyState(glyph, title, hint) {
-  return '<div class="empty-state"><span class="empty-glyph" aria-hidden="true">' + glyph + "</span><strong>" + safe(title) + "</strong><p>" + safe(hint) + "</p></div>";
+/** 空态占位：图形一律取自 SVG 图标库，不使用字符图形也不引入外部素材。 */
+function emptyState(icon, title, hint) {
+  return '<div class="empty-state"><span class="empty-glyph" aria-hidden="true">' + (ICONS[icon] || ICONS.grid) + "</span><strong>" + safe(title) + "</strong><p>" + safe(hint) + "</p></div>";
 }
 
 async function loadUpgrades() {
@@ -419,7 +434,7 @@ async function loadUpgrades() {
             '<button class="primary" data-action="upgrade" data-id="' + safe(c.appId) + '">升级</button></div>',
         )
         .join("")
-    : emptyState("⇧", "没有可升级的软件", "已安装的应用都是最新版本");
+    : emptyState("upgrade", "没有可升级的软件", "已安装的应用都是最新版本");
 }
 
 async function loadApprovals() {
@@ -530,7 +545,7 @@ async function refreshBadge() {
   el("downloads-body").innerHTML =
     [...state.jobs.values()].reverse()
       .map((job) => '<div class="row"><div><strong>' + safe(job.name || job.appId) + "</strong><div class=\"path\">" + safe(job.state) + (job.error ? " · " + safe(job.error) : "") + "</div></div><span></span><span></span></div>")
-      .join("") || emptyState("⤓", "暂无下载任务", "在推荐或分类页点「一键安装」即可开始下载");
+      .join("") || emptyState("download", "暂无下载任务", "在推荐或分类页点「一键安装」即可开始下载");
 }
 
 function connectEvents() {

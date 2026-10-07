@@ -3,12 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/core", "packages/server", "packages/cli", "packages/app"],
-  "engines": { "node": ">=24.0.0" },
+  "workspaces": [
+    "packages/core",
+    "packages/server",
+    "packages/cli",
+    "packages/app"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --experimental-transform-types --test \"packages/**/test/*.test.ts\"",
-    "ci": "npm run typecheck && npm run test && npm run smoke",
+    "test": "node --experimental-transform-types --test --test-force-exit \"packages/**/test/*.test.ts\"",
+    "ci": "npm run typecheck && npm run check:emoji && npm run test && npm run smoke",
     "demo": "node --experimental-transform-types scripts/ui-demo.mts",
     "desktop": "node --experimental-transform-types packages/app/src/desktop.ts",
     "shots": "node --experimental-transform-types scripts/ui-shot.mts http://127.0.0.1:8080/ .shots skin:fresh,home,categories,installed,upgrade,search 1237x762",
@@ -24,7 +31,11 @@
     "discover": "node --experimental-transform-types scripts/discover-packages.mts",
     "build:real-catalog": "node --experimental-transform-types scripts/build-real-catalog.mts",
     "icons": "node packages/app/scripts/gen-icons.mjs --tauri packages/app/src-tauri/icons",
-    "tauri": "npm -w @appcenter/app run tauri"
+    "tauri": "npm -w @appcenter/app run tauri",
+    "check:emoji": "node scripts/check-emoji.mjs"
   },
-  "devDependencies": { "typescript": "^5.9.3", "@types/node": "^24.0.0" }
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^24.0.0"
+  }
 }

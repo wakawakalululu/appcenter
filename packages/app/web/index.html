@@ -9,14 +9,20 @@
   </head>
   <body>
     <header class="topbar">
-      <button class="icon-btn" id="btn-back" aria-label="返回上一页" disabled>&larr;</button>
+      <button class="icon-btn" id="btn-back" aria-label="返回上一页" disabled>
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3 5 8l5 5M5 8h8"/></svg>
+      </button>
       <div class="search" role="search">
         <input id="search" type="search" placeholder="搜索软件名称、拼音、厂商或标签" autocomplete="off" aria-label="搜索软件" />
-        <span class="search-glyph" aria-hidden="true">⌕</span>
+        <span class="search-glyph" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.4"/><path d="m13.5 13.5-3.2-3.2"/></svg>
+        </span>
       </div>
       <div class="topbar-actions">
         <span class="menu-host">
-          <button class="icon-btn" id="btn-menu" aria-label="菜单" aria-haspopup="true" aria-expanded="false">≡</button>
+          <button class="icon-btn" id="btn-menu" aria-label="菜单" aria-haspopup="true" aria-expanded="false">
+            <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
+          </button>
           <div class="menu-pop" id="main-menu" role="menu" hidden>
             <button role="menuitem" data-view="exclusive">专属应用</button>
             <button role="menuitem" data-view="approvals">我的申请<span class="count" id="count-approvals"></span></button>
@@ -28,12 +34,19 @@
           </div>
         </span>
         <button class="icon-btn badge-host" id="btn-downloads" aria-label="下载中心" aria-live="polite">
-          ⤓<span class="dot" id="dot-downloads" hidden></span>
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7M5 7l3 3 3-3M2.5 11v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>
+          <span class="dot" id="dot-downloads" hidden></span>
         </button>
         <span class="spacer" aria-hidden="true"></span>
-        <button class="icon-btn" id="btn-min" aria-label="最小化">─</button>
-        <button class="icon-btn" id="btn-max" aria-label="最大化或还原">▢</button>
-        <button class="icon-btn close" id="btn-close" aria-label="关闭到托盘">✕</button>
+        <button class="icon-btn" id="btn-min" aria-label="最小化">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 8h10"/></svg>
+        </button>
+        <button class="icon-btn" id="btn-max" aria-label="最大化或还原">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg>
+        </button>
+        <button class="icon-btn close" id="btn-close" aria-label="关闭到托盘">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg>
+        </button>
       </div>
     </header>
 

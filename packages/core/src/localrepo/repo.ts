@@ -4,7 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppDetail, AppSummary, Category } from "../catalog/types.ts";
 import type { DownloadPort } from "../orchestrator/installer.ts";
-import { extensionOf, safeName } from "../orchestrator/installer.ts";
+import { extensionOf } from "../orchestrator/installer.ts";
+import { joinWithinRoot, safePathSegment } from "../util/paths.ts";
 
 /**
  * 本地应用包仓库：把目录里的安装包持久化到磁盘并维护一份自描述清单。
@@ -84,30 +85,53 @@ function resolve(root: string | (() => Promise<string> | string)): Promise<strin
 }
 
 /**
- * 本地文件端口：url 是 file:// 或绝对路径时直接复制并校验，不走网络。
- * 这样自动发现出来的真实安装包能用同一套 sync 镜像进仓库（含 sha256 与清单）。
+ * 本地文件端口：url 是 file:// 时直接复制并校验，不走网络。
+ * 自动发现出来的真实安装包靠它镜像进仓库（含 sha256 与清单）。
+ *
+ * 三条硬约束，缺一条就拒：
+ * 1. 只认 `file://`。旧写法把裸绝对路径也当源文件，等于「目录里塞一条 `C:\...`
+ *    就能把本地任意文件拷进镜像、再随清单外泄」的后门；
+ * 2. 必须同时给 expected size and sha256——少一个就等于放弃校验；
+ * 3. 给了 allowedRoots 时源文件必须落在其中之一内。真机工作流（build-real-catalog）
+ *    本来就知道来源根，应当传进来；默认导出不带白名单，行为等同旧代码。
  */
-export const localFileDownloader: DownloadPort = {
-  async download(request) {
-    const source = request.url.startsWith("file://") ? fileURLToPath(request.url) : request.url;
-    const stat = await fs.stat(source).catch(() => null);
-    if (!stat || !stat.isFile()) throw new Error("local package missing: " + source);
-    if (request.expectedSize && stat.size !== request.expectedSize) {
-      throw new Error("local package size mismatch: " + String(stat.size) + " != " + String(request.expectedSize));
-    }
-    await fs.mkdir(path.dirname(request.target), { recursive: true });
-    // 先复制到临时名再改名，避免半个文件被当成已镜像成功。
-    const staging = request.target + ".copying";
-    await fs.copyFile(source, staging);
-    const sha256 = await hashFile(staging);
-    if (request.expectedSha256 && sha256 !== request.expectedSha256.toLowerCase()) {
-      await fs.rm(staging, { force: true });
-      throw new Error("local package checksum mismatch");
-    }
-    await fs.rename(staging, request.target);
-    return { id: request.id, target: request.target, bytes: stat.size, sha256, fromCache: false };
-  },
-};
+export function createLocalFileDownloader(allowedRoots: readonly string[] = []): DownloadPort {
+  return {
+    async download(request) {
+      if (!request.url.startsWith("file://")) throw new Error("local package source must be a file:// URL: " + request.url);
+      const expectedSize = request.expectedSize;
+      const expectedSha256 = request.expectedSha256;
+      if (!expectedSize || !expectedSha256) throw new Error("local package requires expected size and sha256");
+      const source = fileURLToPath(request.url);
+      if (allowedRoots.length > 0) {
+        const resolvedSource = path.resolve(source);
+        const inside = allowedRoots.some((root) => {
+          const base = path.resolve(root);
+          return resolvedSource === base || resolvedSource.startsWith(base + path.sep);
+        });
+        if (!inside) throw new Error("local package source outside the allowed roots: " + source);
+      }
+      const stat = await fs.stat(source).catch(() => null);
+      if (!stat || !stat.isFile()) throw new Error("local package missing: " + source);
+      if (stat.size !== expectedSize) {
+        throw new Error("local package size mismatch: " + String(stat.size) + " != " + String(expectedSize));
+      }
+      await fs.mkdir(path.dirname(request.target), { recursive: true });
+      // 先复制到临时名再改名，避免半个文件被当成已镜像成功。
+      const staging = request.target + ".copying";
+      await fs.copyFile(source, staging);
+      const sha256 = await hashFile(staging);
+      if (sha256 !== expectedSha256.toLowerCase()) {
+        await fs.rm(staging, { force: true });
+        throw new Error("local package checksum mismatch");
+      }
+      await fs.rename(staging, request.target);
+      return { id: request.id, target: request.target, bytes: stat.size, sha256, fromCache: false };
+    },
+  };
+}
+
+export const localFileDownloader: DownloadPort = createLocalFileDownloader();
 
 async function hashFile(file: string): Promise<string> {
   return new Promise((resolveHash, reject) => {
@@ -146,7 +170,9 @@ export class LocalRepo {
           tags: app.tags,
           version: version.version,
           fileName,
-          relativePath: [safeName(app.id), version.version + extensionOf(version.downloadUrl)].join("/"),
+          // appId 与 version 都是目录侧给的字符串：`safeName` 不拦点号也不拦正斜杠，
+          // 单靠它拼得出 `../../evil`。落盘分量一律过 safePathSegment。
+          relativePath: [safePathSegment(app.id), safePathSegment(version.version, "0") + extensionOf(version.downloadUrl)].join("/"),
           sizeBytes: version.sizeBytes,
           sha256: version.sha256,
           url,
@@ -172,9 +198,10 @@ export class LocalRepo {
     const queue = [...items];
     const workers = Array.from({ length: Math.max(1, this.deps.concurrency ?? 2) }, async () => {
       for (let item = queue.shift(); item; item = queue.shift()) {
-        const target = path.join(root, ...item.relativePath.split("/"));
         item.attempts = (previous.get(item.relativePath)?.attempts ?? 0) + 1;
         try {
+          // 越界的 relativePath 只让这条失败，别让一个坏条目把整轮 sync 抛掉。
+          const target = joinWithinRoot(root, item.relativePath);
           const stat = await fs.stat(target).catch(() => null);
           let cached = Boolean(stat && stat.size === item.sizeBytes);
           if (cached && verify === "sha256") cached = (await hashFile(target)) === item.sha256;
@@ -239,7 +266,15 @@ export class LocalRepo {
     let pending = 0;
     let totalBytes = 0;
     for (const item of parsed.items) {
-      const target = path.join(root, ...item.relativePath.split("/"));
+      let target: string;
+      try {
+        target = joinWithinRoot(root, item.relativePath);
+      } catch {
+        // 清单被篡改指向仓库外时，不去 stat 外面的文件，直接按未落盘处理。
+        item.status = "pending";
+        pending += 1;
+        continue;
+      }
       const stat = await fs.stat(target).catch(() => null);
       const intact = Boolean(stat && stat.size === item.sizeBytes && (verify !== "sha256" || (await hashFile(target)) === item.sha256));
       if (intact) {
