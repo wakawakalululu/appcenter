@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AppCenterFacade, type ExecutionRequest, type ExecutionResult, type InstallJob, type ProcessRunner, type WindowHost } from "@appcenter/core";
+import { AppCenterFacade, type ExecutionRequest, type ExecutionResult, type InstallJob, type ProcessRunner, type RegistryKey, type WindowHost } from "@appcenter/core";
 import { contentType, dispatch, readStatic } from "./dispatch.ts";
 
 /** 桌面宿主未接入时，窗口由这里记录状态，UI 上的窗口面板与托盘面板据此渲染。 */
@@ -187,6 +187,11 @@ export interface StartOptions {
    * 真实部署不要开这个开关。
    */
   simulateInstalls?: boolean;
+  /**
+   * 给了就用内存注册表替代真机扫描。演示/截图入口靠它避免把开发者机器的真实已装清单
+   * 烤进公开配图 —— installed.png 曾经同时带出对照对象的厂商名与安装路径。
+   */
+  registryKeys?: readonly RegistryKey[];
 }
 
 /** 只记录、不执行的进程端口，给演示宿主用。 */
@@ -209,6 +214,7 @@ export async function startUi(options: StartOptions): Promise<{ server: Server; 
       appVersion: options.appVersion ?? "1.0.0",
       token: options.token ?? "",
       runner,
+      registryKeys: options.registryKeys,
     },
     new RecordingWindowHost(),
   );

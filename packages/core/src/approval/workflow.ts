@@ -20,6 +20,11 @@ export interface Grant {
   token: string;
   appId: string;
   userId: string;
+  /**
+   * 被批准的具体版本。审批请求本来就是按版本建的（approvals.app_version），
+   * 凭证若不绑版本，批一个旧版本就能装同应用的任意新版本 —— 审批的门禁作用形同虚设。
+   */
+  appVersion: string;
   issuedAt: string;
   expiresAt: string;
   signature: string;
@@ -34,7 +39,8 @@ export interface GrantContext {
 export class ApprovalError extends Error {}
 
 function payloadOf(grant: Omit<Grant, "signature">): string {
-  return [grant.appId, grant.userId, grant.issuedAt, grant.expiresAt, grant.token].join("|");
+  // 字段顺序必须与服务端 signGrantPayload 完全一致，否则两侧签出来的串对不上。
+  return [grant.appId, grant.userId, grant.appVersion, grant.issuedAt, grant.expiresAt, grant.token].join("|");
 }
 
 /**
@@ -107,6 +113,7 @@ export class ApprovalWorkflow {
       token: randomBytes(16).toString("hex"),
       appId: request.appId,
       userId: request.applicant,
+      appVersion: request.appVersion,
       issuedAt: now.toISOString(),
       expiresAt: request.expiresAt ?? new Date(now.getTime() + 86400_000).toISOString(),
     };
@@ -154,6 +161,8 @@ export class ApprovalWorkflow {
     }
     if (grant.appId !== context.appId) return { ok: false, reason: "app-mismatch" };
     if (grant.userId !== context.userId) return { ok: false, reason: "user-mismatch" };
+    // 缺版本字段的旧凭证同样拒掉：把它当「不限版本」用就等于给历史泄漏开后门。
+    if (!grant.appVersion || grant.appVersion !== context.appVersion) return { ok: false, reason: "version-mismatch" };
     // 时间戳解析不了就必须当作「已失效」：旧写法 `new Date("乱码").getTime() <= now` 拿到 NaN，
     // 比较恒为 false，于是这张凭证永远不会过期。
     const issuedAt = Date.parse(grant.issuedAt);

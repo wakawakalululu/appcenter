@@ -4,18 +4,25 @@
  * Web UI 源码额外禁止「字符图形当图标」——图标一律用内联 SVG（静态写在 index.html，
  * 动态渲染取自 app.js 的 ICONS）。
  *
- * 用法：
- *   node scripts/check-emoji.mjs            # 检查，发现违规退出码 1 并逐条列出
- *   node scripts/check-emoji.mjs --fix-doc  # 顺手清掉 Markdown 里的 emoji（谨慎：按映射表替换）
+ * 用法：node scripts/check-emoji.mjs   # 检查，发现违规退出码 1 并逐条列出
  */
 import { readdirSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 const SKIP_DIRS = new Set([
   ".git", "node_modules", ".shots", "smoke-packages", "data", "local-repo",
   "_internal", "packages/app/src-tauri/target", "packages/app/src-tauri/gen",
 ]);
-const TEXT_EXT = new Set([".md", ".html", ".css", ".js", ".mjs", ".cjs", ".mts", ".ts", ".json", ".ps1", ".yml", ".yaml"]);
+// 白名单要等于"可发布的文本文件"这个集合本身，少一种扩展名就是一个静默盲区：
+// 早先漏了 .rs/.toml/.svg/.py（这些都在发布树里），emoji 写进去既不会被本门禁抓到，也不会有别的门禁抓。
+const TEXT_EXT = new Set([".md", ".html", ".css", ".js", ".mjs", ".cjs", ".mts", ".ts", ".tsx", ".json", ".ps1", ".py", ".rb", ".sh", ".bash", ".zsh", ".rs", ".toml", ".ini", ".env", ".yml", ".yaml", ".svg", ".txt", ".xml", ".csv"]);
+// 按名字收进来的发布文本。这里有过一次真盲区：白名单里写着 ".gitignore"，
+// 但 path.extname(".gitignore") 返回空串（点文件没有"扩展名"），那条永远匹配不到；
+// 实测发布树里 extname 为空的文本共三个——.gitignore、LICENSE、docs/.nojekyll——一个都没被查过。
+// LICENSE 尤其不该漏：它是公开面上最显眼的人读文本之一。
+const TEXT_NAMES = new Set([".gitignore", ".nojekyll", "LICENSE"]);
+const inScope = (file) => TEXT_EXT.has(path.extname(file)) || TEXT_NAMES.has(path.basename(file));
 
 // emoji 与变体选择符：任何文本源都不允许。
 const EMOJI = /[\u{1F000}-\u{1FAFF}\u{1F1E6}-\u{1F1FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{1F900}-\u{1F9FF}]/u;
@@ -28,8 +35,34 @@ function* walk(dir) {
     if (SKIP_DIRS.has(entry.name)) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) yield* walk(full);
-    else if (TEXT_EXT.has(path.extname(entry.name))) yield full;
+    else if (inScope(entry.name)) yield full;
   }
+}
+
+/**
+ * 门禁只对「会进公开面」的文件负责：已入库的，加上没入库但也没被 .gitignore 的（作者打算提交的）。
+ * 直接遍历工作树会把 `LOCAL-NOTES.md`、`discover-report.json` 这类只在本机存在的文件算进来——
+ * 第三方应用名里冒出一个 emoji 就让本地门禁变红，而 CI 的 checkout 里根本没有这个文件，
+ * 「本地红 / CI 绿」会让人开始无视门禁，所以按 git 的可见集合收口。
+ * 拿不到 git（导出 tarball、极简镜像）时退回遍历：宁可多查，不可漏查。
+ */
+function publishableScope() {
+  const top = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  if (top.status !== 0 || !top.stdout.trim()) return null;
+  const root = top.stdout.trim();
+  const listed = spawnSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    { cwd: root, encoding: "utf8" },
+  );
+  if (listed.status !== 0) return null;
+  return {
+    root,
+    files: listed.stdout
+      .split("\0")
+      .filter((f) => f && inScope(f))
+      .map((f) => path.join(root, ...f.split("/"))),
+  };
 }
 
 function codepointName(ch) {
@@ -37,9 +70,10 @@ function codepointName(ch) {
   return "U+" + cp;
 }
 
+const scope = publishableScope() ?? { root: process.cwd(), files: [...walk(process.cwd())] };
 const violations = [];
-for (const file of walk(process.cwd())) {
-  const rel = path.relative(process.cwd(), file).replace(/\\/g, "/");
+for (const file of scope.files) {
+  const rel = path.relative(scope.root, file).replace(/\\/g, "/");
   let text;
   try {
     text = readFileSync(file, "utf8");

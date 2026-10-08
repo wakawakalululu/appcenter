@@ -84,22 +84,39 @@ export function dedupeInstalled(apps: readonly InstalledApp[]): InstalledApp[] {
 export interface ScanOptions {
   includeSystemComponents?: boolean;
   hives?: ("HKLM" | "HKCU")[];
+  /**
+   * 单个卸载根查询失败时的回调。不传就退回 console.warn：
+   * 关键是**不能静默**——少扫一个根与「这台机器真的没装软件」在界面上长得一模一样，
+   * 而升级计划与残留扫描都会跟着变成空。
+   */
+  onRootError?: (err: Error, rootPath: string) => void;
 }
 
 export async function scanInstalledApps(reg: RegClient, options: ScanOptions = {}): Promise<InstalledApp[]> {
   const wanted = new Set(options.hives ?? ["HKLM", "HKCU"]);
   const roots = UNINSTALL_ROOTS.filter((r) => wanted.has(r.hive));
   // 三个卸载根并行扫描，避免串行累加约 2s 的卡顿。
-  const keySets = await Promise.all(roots.map((r) => reg.queryTree(r.path)));
+  // 每个根单独收口：旧写法用裸 Promise.all，任一根失败（HKCU 被策略禁用、reg.exe 对该 hive 报错）
+  // 就让整份清单变成 rejected，facade.installed() 不兜异常 ⇒ 已装列表/升级计划/残留扫描一起下线。
+  const results = await Promise.all(
+    roots.map((root) =>
+      reg.queryTree(root.path).then(
+        (keys) => ({ root, keys, error: null as Error | null }),
+        (err: unknown) => ({ root, keys: [] as RegistryKey[], error: err instanceof Error ? err : new Error(String(err)) }),
+      ),
+    ),
+  );
+  const report = options.onRootError ?? ((err: Error, rootPath: string): void => { console.warn("已装清单扫描失败（" + rootPath + "）：" + err.message); });
   const collected: InstalledApp[] = [];
-  roots.forEach((root, index) => {
-    for (const key of keySets[index] ?? []) {
+  for (const { root, keys, error } of results) {
+    if (error) report(error, root.path);
+    for (const key of keys) {
       const app = toInstalledApp(key, root.label, root.hive, root.hive === "HKLM");
       if (!app) continue;
       if (app.systemComponent && !options.includeSystemComponents) continue;
       collected.push(app);
     }
-  });
+  }
   return dedupeInstalled(collected);
 }
 

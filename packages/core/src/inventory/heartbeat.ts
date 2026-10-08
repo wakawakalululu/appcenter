@@ -25,7 +25,7 @@ export interface AssetSummary {
   reportedAt: string;
   /** 目录内已装应用（含可升级）。 */
   installed: AssetApp[];
-  /** 待审批（受管控且尚无凭证）的应用 id。 */
+  /** 待审批（需申请且尚无凭证）的应用 id。 */
   needsApproval: string[];
   counts: {
     installed: number;

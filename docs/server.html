@@ -47,14 +47,15 @@ PACKAGE_ROOT=/srv/packages \
       <table>
         <thead><tr><th>环境变量</th><th>作用</th></tr></thead>
         <tbody>
-          <tr><td><code>ADMIN_TOKEN</code></td><td>管理员令牌；<strong>不配置时为开放模式</strong>，仅适合本地演示</td></tr>
+          <tr><td><code>ADMIN_TOKEN</code></td><td>管理员令牌；<strong>不配置时管理类与客户端写入类接口一律拒绝（fail-closed）</strong>。要跑无鉴权演示必须显式传 <code>allowUnauthenticatedAdmin</code></td></tr>
           <tr><td><code>DB_FILE</code></td><td>SQLite 路径，默认内存库</td></tr>
           <tr><td><code>PACKAGE_ROOT</code></td><td>安装包存放根目录</td></tr>
         </tbody>
       </table>
 
       <h2 id="auth">令牌与角色</h2>
-      <p>管理类接口需要 <code>Authorization: Bearer &lt;token&gt;</code>。令牌有两种来源：</p>
+      <p>管理类接口需要 <code>Authorization: Bearer &lt;token&gt;</code>；客户端的<strong>写入</strong>接口（安装回执、资产心跳）同样需要，且服务端先验身份再读请求体。
+      没配 <code>ADMIN_TOKEN</code> 时主体恒为空，这类写入一律 401。令牌有两种来源：</p>
       <ul>
         <li>静态管理员令牌：直接使用 <code>ADMIN_TOKEN</code> 的值。</li>
         <li>用户令牌：<code>POST /api/login</code> 签发，携带 <code>role</code>（<code>user</code> / <code>admin</code>）。库内只存令牌哈希。</li>
@@ -74,7 +75,7 @@ PACKAGE_ROOT=/srv/packages \
           <tr><td>GET</td><td><code>/api/banners</code></td><td>运营位</td></tr>
           <tr><td>GET</td><td><code>/api/bundles</code></td><td>捆绑包（装机套装）</td></tr>
           <tr><td>GET</td><td><code>/api/self-update</code></td><td>已发布的客户端新版本清单</td></tr>
-          <tr><td>POST</td><td><code>/api/apps/:id/receipt</code></td><td>客户端上报安装回执</td></tr>
+          <tr><td>POST</td><td><code>/api/apps/:id/receipt</code></td><td>客户端上报安装回执（需 <code>Authorization: Bearer</code>；先验身份再读体）</td></tr>
         </tbody>
       </table>
 

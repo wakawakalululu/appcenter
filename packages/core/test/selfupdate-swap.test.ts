@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { SelfUpdater, applyUpdate, type DownloadResult, type SelfUpdateManifest } from "@appcenter/core";
+import { makeTrackedTmp } from "./util/tmp-dirs.ts";
 
 const sha = (buffer: Buffer): string => createHash("sha256").update(buffer).digest("hex");
 
@@ -21,7 +21,7 @@ function downloaderFor(payload: Buffer) {
 }
 
 async function sandbox(): Promise<{ root: string; appDir: string; stagingDir: string }> {
-  const root = await mkdtemp(path.join(tmpdir(), "swap-"));
+  const root = await makeTrackedTmp("swap-");
   const appDir = path.join(root, "app");
   const stagingDir = path.join(root, "staging");
   await mkdir(appDir, { recursive: true });

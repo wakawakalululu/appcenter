@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { CatalogDb, createApi, seedDemo } from "../src/server.ts";
 import { AppCenterFacade, DEFAULT_RUNTIME_CONFIG, RuntimeConfigStore, sanitize, type WindowHost } from "@appcenter/core";
+import { makeTrackedTmp } from "../../core/test/util/tmp-dirs.ts";
 
 class NoopHost implements WindowHost {
   async create(): Promise<string> {
@@ -19,7 +20,7 @@ class NoopHost implements WindowHost {
 }
 
 const adminToken = "admin-token";
-const packageRoot = await mkdtemp(path.join(tmpdir(), "extras-pkgs-"));
+const packageRoot = await makeTrackedTmp("extras-pkgs-");
 const db = CatalogDb.memory("extras-secret");
 const server = createApi({ db, packageRoot, adminToken });
 let base = "";
@@ -35,12 +36,12 @@ after(async () => {
 });
 
 async function facadeFor(userId: string): Promise<AppCenterFacade> {
-  const dataDir = await mkdtemp(path.join(tmpdir(), "extras-data-"));
+  const dataDir = await makeTrackedTmp("extras-data-");
   return new AppCenterFacade({ serverUrl: base, userId, dataDir, appVersion: "1.0.0", token: adminToken, registryKeys: [] }, new NoopHost());
 }
 
 test("runtime config keeps the download dir and clamps out-of-range settings", async () => {
-  const file = path.join(await mkdtemp(path.join(tmpdir(), "extras-cfg-")), "runtime-config.json");
+  const file = path.join(await makeTrackedTmp("extras-cfg-"), "runtime-config.json");
   const store = new RuntimeConfigStore(file, { downloadDir: "C:\\cache" });
   assert.equal((await store.load()).downloadDir, "C:\\cache");
   assert.equal(await store.packageDir(), "C:\\cache");
@@ -60,7 +61,7 @@ test("runtime config keeps the download dir and clamps out-of-range settings", a
 });
 
 test("shared runtime config file survives a partial write and is repaired on load", async () => {
-  const file = path.join(await mkdtemp(path.join(tmpdir(), "extras-repair-")), "runtime-config.json");
+  const file = path.join(await makeTrackedTmp("extras-repair-"), "runtime-config.json");
   await writeFile(file, "{ this is not json", "utf8");
   const store = new RuntimeConfigStore(file, { concurrency: 5 });
   const config = await store.load();
@@ -226,7 +227,7 @@ test("asset heartbeat upserts per machine and aggregates into the admin fleet vi
 test("heartbeat endpoint rejects a payload without a machine id", async () => {
   const res = await fetch(base + "/api/heartbeat", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: "Bearer " + adminToken },
     body: JSON.stringify({ appVersion: "1.0.0", installed: [], needsApproval: [], counts: {} }),
   });
   assert.equal(res.status, 400);

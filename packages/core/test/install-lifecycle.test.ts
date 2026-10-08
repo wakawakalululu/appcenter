@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { makeTrackedTmp } from "./util/tmp-dirs.ts";
 import {
   ApprovalWorkflow,
   InstallOrchestrator,
@@ -75,7 +77,7 @@ async function build(options: {
   packageDirImpl?: () => Promise<string>;
   exitCode?: number;
 }): Promise<{ orch: InstallOrchestrator; dir: string; installedCalls: { n: number } }> {
-  const dir = await mkdtemp(path.join(tmpdir(), "lifecycle-"));
+  const dir = await makeTrackedTmp("lifecycle-");
   const installedCalls = { n: 0 };
   const orch = new InstallOrchestrator({
     catalog: { detail: options.detailImpl ?? (async (id) => (id === detail.id ? detail : null)) },

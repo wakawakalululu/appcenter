@@ -1,6 +1,6 @@
 import type { InstalledApp } from "../inventory/inventory.ts";
 import type { RegClient, RegistryKey, RegistryValue } from "../inventory/registry.ts";
-import type { ResidueItem } from "./scan.ts";
+import type { ResidueGap, ResidueItem } from "./scan.ts";
 
 const SEP = "\\";
 
@@ -77,11 +77,26 @@ export async function scanContextMenu(
   app: InstalledApp,
   reg: RegClient,
   matches: (candidate: string) => boolean,
-): Promise<ResidueItem[]> {
+): Promise<{ items: ResidueItem[]; gaps: ResidueGap[] }> {
   const items: ResidueItem[] = [];
+  const gaps: ResidueGap[] = [];
+  const gap = (source: string, err: unknown): void => {
+    gaps.push({ kind: "contextmenu", source, error: err instanceof Error ? err.message : String(err) });
+  };
   const clsidCache = new Map<string, ClsidInfo>();
   // 五个挂载点并行取数，再按 CONTEXTMENU_ROOTS 原顺序处理，保证结果与顺序不变。
-  const dumps = await Promise.all(CONTEXTMENU_ROOTS.map((root) => reg.queryTree(root)));
+  // 单个挂载点读失败只丢那一个根，其余根的命中照旧出结果，失败精确记到那个根——
+  // 过去这里是一枚裸 Promise.all，任一根失败就让整类归零（调用侧只能按整段兜底，粒度太粗）。
+  const dumps = await Promise.all(
+    CONTEXTMENU_ROOTS.map(async (root) => {
+      try {
+        return await reg.queryTree(root);
+      } catch (err) {
+        gap(root, err);
+        return [] as RegistryKey[];
+      }
+    }),
+  );
 
   interface Candidate {
     root: string;
@@ -104,7 +119,13 @@ export async function scanContextMenu(
   }
 
   await mapWithConcurrency([...uniqueGuids], 8, async (guid) => {
-    await moduleOfClsid(reg, guid, clsidCache);
+    try {
+      await moduleOfClsid(reg, guid, clsidCache);
+    } catch (err) {
+      // 一个损坏或无权限的 CLSID 只让**这一项**的证据不完整，不该把整类报废；
+      // 少了 InprocServer32/描述仍可能靠值本身命中，所以必须把缺口传到报告上而不是静默降级。
+      gap(clsidKey(guid), err);
+    }
   });
 
   const seen = new Set<string>();
@@ -128,5 +149,5 @@ export async function scanContextMenu(
       reason: "orphan-context-menu-handler",
     });
   }
-  return items;
+  return { items, gaps };
 }

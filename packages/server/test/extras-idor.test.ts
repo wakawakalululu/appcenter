@@ -1,18 +1,20 @@
 import { test } from "node:test";
-import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { mkdtemp } from "node:fs/promises";
+import assert from "node:assert/strict";
+
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { CatalogDb, createApi, seedDemo } from "../src/server.ts";
 import { createUser, issueToken } from "../src/auth.ts";
+import { makeTrackedTmp } from "../../core/test/util/tmp-dirs.ts";
 
 const adminToken = "idor-admin";
 
 async function start(): Promise<{ base: string; db: CatalogDb; close: () => Promise<void> }> {
   const db = CatalogDb.memory("idor-secret");
   seedDemo(db);
-  const api = createApi({ db, packageRoot: await mkdtemp(path.join(tmpdir(), "idor-pkgs-")), adminToken });
+  const api = createApi({ db, packageRoot: await makeTrackedTmp("idor-pkgs-"), adminToken });
   const port = await new Promise<number>((resolve) => api.listen(0, "127.0.0.1", () => resolve((api.address() as AddressInfo).port)));
   return {
     base: "http://127.0.0.1:" + String(port),
@@ -119,7 +121,7 @@ test("特征测试：未配置身份的匿名调用维持旧行为（部署方�
 test("未设 ADMIN_TOKEN 时管理端点不得默认放行", async () => {
   const db = CatalogDb.memory("idor-open-secret");
   seedDemo(db);
-  const api = createApi({ db, packageRoot: await mkdtemp(path.join(tmpdir(), "idor-open-pkgs-")) });
+  const api = createApi({ db, packageRoot: await makeTrackedTmp("idor-open-pkgs-") });
   const port = await new Promise<number>((resolve) => api.listen(0, "127.0.0.1", () => resolve((api.address() as AddressInfo).port)));
   const base = "http://127.0.0.1:" + String(port);
   try {

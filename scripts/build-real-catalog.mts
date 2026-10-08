@@ -6,6 +6,8 @@
  *
  * 安全边界：
  * - 只镜像本机已有的安装包文件（file://），绝不下载或执行任何东西。
+ * - 除非显式配置 CATALOG_MANIFEST_URL + REPO_ALLOWED_URL_PREFIXES，才从白名单内的
+ *   URL 拉远端清单与安装包；不配置时 http(s) 一律拒绝（边界不变）。
  * - 不拷贝已安装应用目录里的二进制。
  * - 发布到服务端后，安装动作仍由 UI 走 simulateInstalls / silent 流程，这里不触发安装。
  */
@@ -16,6 +18,10 @@ import {
   defaultInstallerRoots,
   discoverPackages,
   createLocalFileDownloader,
+  createRepoDownloader,
+  fetchRepoManifest,
+  repoManifestSourceFromEnv,
+  Downloader,
   packageToCatalogApp,
   scanInstalledApps,
   LocalRepo,
@@ -34,6 +40,9 @@ const DEMO_APP_IDS = [
   "music-player",
   "wps-office",
   "mobile-desktop",
+  // 已从 seedDemo 移出的演示应用：存量库里即便仍有残留，构建真实目录时也要一并清掉。
+  "phone-mirror",
+  "app-lite",
   "video-player",
   "enterprise-im",
   "code-ide",
@@ -156,10 +165,31 @@ async function main(): Promise<void> {
   console.log("\n== 镜像安装包到本地仓库 ==");
   const apps = await Promise.all(withHash.map(async ({ pkg, sha256 }) => packageToCatalogApp(pkg, sha256)));
   const categories = (await api("GET", "/api/categories").then((r) => r.json)) as Category[] | null;
-  // 来源白名单就用发现阶段认下的那几个根：目录里的 file:// 只能指向它们之内，
-  // 否则一条被污染的清单就能把本机任意文件拷进镜像再随 manifest.json 外泄。
-  const repo = new LocalRepo({ downloader: createLocalFileDownloader(roots.map((root) => root.dir)), root: REPO_ROOT, verify: "size" });
-  const syncReport = await repo.sync({ apps, categories: categories ?? [FALLBACK_CATEGORY], allVersions: false });
+  // 来源白名单：file:// 只认发现阶段认下的那几个根，否则一条被污染的清单就能把本机任意
+  // 文件拷进镜像再随 manifest.json 外泄；http(s) 只认 REPO_ALLOWED_URL_PREFIXES，
+  // 不配置时拒绝一切外网拉取（与改造前行为一致）。
+  const manifestSource = repoManifestSourceFromEnv();
+  const repo = new LocalRepo({
+    downloader: createRepoDownloader({
+      allowedFileRoots: roots.map((root) => root.dir),
+      allowedUrlPrefixes: manifestSource?.allowedUrlPrefixes ?? [],
+      http: manifestSource ? new Downloader({ concurrency: 2 }) : undefined,
+    }),
+    root: REPO_ROOT,
+    verify: "size",
+  });
+  let syncReport;
+  try {
+    const manifest = manifestSource ? await fetchRepoManifest(manifestSource) : undefined;
+    syncReport = manifest
+      ? await repo.sync({ manifest })
+      : await repo.sync({ apps, categories: categories ?? [FALLBACK_CATEGORY], allVersions: false });
+  } catch (err) {
+    // 清单拉不到或校验不过，一律降级到本机已发现的应用。绝不拿半截清单去 sync——
+    // 那会把仓库里已有的包全标成 pending 并重写 manifest.json。
+    console.warn("远端清单不可用，回退本机发现：" + (err instanceof Error ? err.message : String(err)));
+    syncReport = await repo.sync({ apps, categories: categories ?? [FALLBACK_CATEGORY], allVersions: false });
+  }
   console.log(`镜像：${syncReport.saved.length} 新存，${syncReport.cached.length} 已缓存，${syncReport.failed.length} 失败`);
   console.log(`本地仓库占用：${Math.round(syncReport.totalBytes / 1048576)}MB，用时 ${syncReport.durationMs}ms`);
   for (const f of syncReport.failed) console.log(`  [失败] ${f.appId}@${f.version}: ${f.error}`);

@@ -56,6 +56,7 @@ async function readValue(keyPath: string, name: string): Promise<string | null> 
 
 const env: ScanEnv = {
   programData: ["C:", "ProgramData"].join(SEP),
+  systemRoot: process.env.SystemRoot ?? ["C:", "Windows"].join(SEP),
   appData: path.join(tmpdir(), "selftest-appdata"),
   commonStartMenu: path.join(tmpdir(), "selftest-menu-common"),
   userStartMenu: path.join(tmpdir(), "selftest-menu-user"),
@@ -84,7 +85,7 @@ const app: InstalledApp | null = toInstalledApp(
 if (!app) throw new Error("fixture installed app could not be built");
 
 console.log("== scan residue with the real reg.exe client ==");
-const report = await scanResidue(app, { reg: new RegExeClient(), fs: { exists: async () => false }, env });
+const report = await scanResidue(app, { reg: new RegExeClient(), fs: { exists: async () => false, readDir: async () => [], readText: async () => null }, env });
 const kinds = report.items.map((item) => item.kind + ":" + item.risk);
 console.log("   residue: " + JSON.stringify(kinds));
 console.log("   phases ms: " + JSON.stringify(report.durationMs));

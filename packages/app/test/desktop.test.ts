@@ -37,6 +37,22 @@ test("shell args launch an app window with geometry and an isolated profile", ()
   assert.ok(args.includes("--no-first-run"));
 });
 
+test("浏览器位置随环境变量走：系统盘不是 C: 也找得到", () => {
+  const list = shellCandidates({
+    ProgramFiles: "D:\\Program Files",
+    "ProgramFiles(x86)": "D:\\Program Files (x86)",
+    LOCALAPPDATA: "D:\\Users\\mock\\AppData\\Local",
+  });
+  assert.ok(list.includes("D:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"));
+  assert.ok(list.includes("D:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"));
+  assert.ok(list.includes("D:\\Users\\mock\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe"), "用户级安装的 Chrome 也要在列");
+  assert.ok(!list.some((c) => String(c).startsWith("C:\\")), "环境变量给全时不该再冒出写死 C: 的候选");
+  // 反过来：没有那些变量时要退回 C: 兜底，候选不能变空（CI 与纯净环境靠它）。
+  const fallback = shellCandidates({});
+  assert.ok(String(fallback[1]).startsWith("C:\\"));
+  assert.ok(fallback.some((c) => String(c).includes("msedge.exe")));
+});
+
 test("default candidates prefer chrome then edge, env override first", () => {
   const original = process.env.SHELL_PATH;
   try {

@@ -1,6 +1,7 @@
 import { test } from "node:test";
+import { makeTrackedTmp } from "./util/tmp-dirs.ts";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -21,7 +22,7 @@ function downloaderFor(payload: Buffer) {
 }
 
 async function sandbox(): Promise<{ appDir: string; stagingDir: string; exe: string; backupDir: string }> {
-  const root = await mkdtemp(path.join(tmpdir(), "selfupd-"));
+  const root = await makeTrackedTmp("selfupd-");
   const appDir = path.join(root, "app");
   const stagingDir = path.join(root, "staging");
   await mkdir(appDir, { recursive: true });

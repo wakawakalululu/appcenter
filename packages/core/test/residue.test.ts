@@ -1,9 +1,10 @@
 import { test } from "node:test";
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { readBackupSet, restoreBackupSetWith, verifyBackupIntegrity, writeBackupManifest } from "../src/leftover/backup.ts";
+import { makeTrackedTmp } from "./util/tmp-dirs.ts";
 import {
   InMemoryRegClient,
   SingleInstanceLock,
@@ -21,7 +22,7 @@ import {
 const BS = String.fromCharCode(92);
 
 test("single instance lock is held by a live process and reclaimed when stale", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "lock-"));
+  const dir = await makeTrackedTmp("lock-");
   const file = path.join(dir, "appcenter.lock");
   const lock = new SingleInstanceLock(file);
   const first = await lock.acquire();
@@ -37,7 +38,7 @@ test("single instance lock is held by a live process and reclaimed when stale", 
 });
 
 test("residue scan on a synthetic machine catches every leftover class and the plan classifies them", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "residue-"));
+  const dir = await makeTrackedTmp("residue-");
   const installDir = ["C:", "Program Files", "Demo App"].join(BS);
   const uninstallRoot = UNINSTALL_ROOTS[0]?.path ?? "";
   const reg = new InMemoryRegClient([
@@ -130,7 +131,7 @@ test("residue scan on a synthetic machine catches every leftover class and the p
 });
 
 test("backup manifests round-trip and a tampered .reg refuses to import", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "backup-"));
+  const dir = await makeTrackedTmp("backup-");
   const record = { keyPath: "HKCU\Software\Demo", file: path.join(dir, "demo.reg"), sha256: "", ok: true, message: "exported" };
   const payload = Buffer.from("Windows Registry Editor Version 5.00");
   await writeFile(record.file, payload);
@@ -157,7 +158,7 @@ test("backup manifests round-trip and a tampered .reg refuses to import", async 
 });
 
 test("context menu handlers still pointing at the app are reported as value-level residue", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ctx-"));
+  const dir = await makeTrackedTmp("ctx-");
   const clsid = "{6B2C1D4E-1111-2222-3333-444455556666}";
   const handlerRoot = ["HKCR", "*", "shellex", "ContextMenuHandlers"].join(BS);
   const reg = new InMemoryRegClient([
@@ -212,7 +213,7 @@ class CountingRegClient {
 }
 
 test("the same CLSID mounted on several handlers is resolved only once", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ctx-memo-"));
+  const dir = await makeTrackedTmp("ctx-memo-");
   const clsid = "{6B2C1D4E-AAAA-BBBB-CCCC-DDDDEEEEFFFF}";
   const clsidPath = ["HKCR", "CLSID", clsid].join(BS);
   const mounted = ["*", "Directory", "Folder"];
@@ -247,7 +248,7 @@ test("the same CLSID mounted on several handlers is resolved only once", async (
 });
 
 test("context menu reports every matching handler and resolves each unique CLSID once", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ctx-parallel-"));
+  const dir = await makeTrackedTmp("ctx-parallel-");
   const hit = "{11111111-1111-1111-1111-111111111111}";
   const miss = "{22222222-2222-2222-2222-222222222222}";
   const hitClsidPath = ["HKCR", "CLSID", hit].join(BS);

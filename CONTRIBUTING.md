@@ -23,15 +23,20 @@ npm test            # node --test
 
 ## 提交前检查
 
-1. `npm run typecheck` 干净。
+1. `npm run ci` 干净（typecheck → check:emoji → check:links → check:licenses → 测试 → 冒烟）。
 2. `npm test` 全绿；新增行为请补对应测试。
-3. 不提交运行时产物：`local-repo/`、`*.db`、`*.log`、`.shots/` 已在 `.gitignore`。
-4. 不提交任何第三方专有二进制或安装包。
+3. push 前跑 `npm run check:delivery`：它列出还没进仓库的文件。CI 只看得到已提交的内容，
+   漏 `git add` 的测试不会让任何人流水变红——2026-10-07 实测过一次少 32 个测试文件＝少 139 条用例（历史读数，不是当前规模），而「用例数下限」仍放行。
+4. push 前跑 `npm run check:commits -- <基线提交>..HEAD`：提交信息也是公开面，而文件级门禁（`git grep HEAD`）
+   结构上查不到它。CI 的 compliance 作业已带这一步；本地先跑能省一次红。
+5. 不提交运行时产物：`local-repo/`、`*.db`、`*.log`、`.shots/` 已在 `.gitignore`。
+6. 不提交任何第三方专有二进制或安装包。
 
 ## 提交信息
 
 使用语义化前缀：`feat:` / `fix:` / `docs:` / `refactor:` / `test:` / `chore:`。
 正文说明「为什么」，而非逐行复述改动。
+措辞约束同公开面：推上去之后提交信息就是公开内容，禁用标识由 `scripts/check-commit-msg.mjs` 拦在流水线里。
 
 ## 设计约束
 

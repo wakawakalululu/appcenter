@@ -42,7 +42,7 @@ for (const entry of manifest.catalog.apps) {
   } else noMatch++;
 }
 
-const line = (s: string): void => process.stdout.write(s + "\n");
+const line = (s: string): void => { process.stdout.write(s + "\n"); };
 line(`真机已装清单 ${installed.length} 项；目录 apps ${manifest.catalog.apps.length} 项（只读测量，不执行任何安装）\n`);
 line(`当前「displayName 全等」回读命中 : ${exactHit}`);
 line(`归一化(大小写/空白)后额外安全命中 : ${normOnlyRecovery}   ← 保守匹配可挽回`);

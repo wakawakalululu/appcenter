@@ -5,7 +5,15 @@ import type { AssetSummary, FleetDetail, FleetReport } from "./inventory/heartbe
 
 export interface ApprovalTicket {
   requestId: string;
+  appId: string;
+  appVersion: string;
+  applicant: string;
   status: string;
+  reason: string;
+  createdAt: string;
+  decidedAt?: string;
+  decidedBy?: string;
+  expiresAt?: string;
   grant?: Grant;
 }
 
@@ -65,6 +73,22 @@ export class RemoteCatalog {
 
   myApprovals(applicant: string): Promise<ApprovalTicket[]> {
     return this.request("/api/approvals?applicant=" + encodeURIComponent(applicant));
+  }
+
+  /** 管理端全量工单（仅管理员令牌有效）。 */
+  adminApprovals(): Promise<ApprovalTicket[]> {
+    return this.request("/api/approvals");
+  }
+
+  decideApproval(requestId: string, decision: "approved" | "rejected", decidedBy: string, note = ""): Promise<{ ok: boolean }> {
+    return this.request("/api/approvals/" + encodeURIComponent(requestId) + "/decide", {
+      method: "POST",
+      body: JSON.stringify({ decision, decidedBy, note }),
+    });
+  }
+
+  revokeApproval(requestId: string): Promise<{ ok: boolean }> {
+    return this.request("/api/approvals/" + encodeURIComponent(requestId) + "/revoke", { method: "POST" });
   }
 
   redeemGrant(requestId: string): Promise<Grant> {

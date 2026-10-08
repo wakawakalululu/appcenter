@@ -6,6 +6,8 @@
 
 企业「应用中心 / 软件商店」客户端引擎 + 目录服务端。TypeScript 实现，零构建步骤（Node 直接跑 TS）。
 
+<img src="docs/assets/logo.svg" alt="AppCenter Logo" width="72" height="72">
+
 ![应用中心首页](docs/assets/screenshots/home.png)
 
 <table>
@@ -198,7 +200,7 @@ ADMIN_TOKEN=xxx DB_FILE=/var/lib/appcenter/catalog.db PACKAGE_ROOT=/srv/packages
 已完成：目录 / 分类 / 搜索 / 评分 / 清单（含缓存与增量刷新）/ 残留扫描 / 清理计划与备份撤销 /
 断点续传下载 / 多类型安装执行计划 / 装后版本回读 / 编排与批量队列 / 升级计划 / 自升级 /
 审批与通知回路 / 皮肤 / 窗口 / 托盘 / 开机自启开关 / 真机安装包发现与本地仓库镜像 /
-服务端（鉴权、审计、部门目录、捆绑包、运营位、机群资产心跳与离线判定）/ CLI 与桌面 UI，共 137 项测试。
+服务端（鉴权、审计、部门目录、捆绑包、运营位、机群资产心跳与离线判定）/ CLI 与桌面 UI，全套自动化测试与类型检查在 CI 上强制（含用例数下限断言，防止测试退化成零用例仍报绿）。
 
 目录应用支持 `installMode: silent | manual`——手动安装弹真实安装向导（执行计划剥掉静默参数）。
 
@@ -241,7 +243,7 @@ manifest.json 同时携带**目录快照**（全部应用 + 分类），拿到�
 ```json
 {
   "formatVersion": 1,
-  "catalog": { "apps": ["…21 个应用摘要"], "categories": ["…分类树"] },
+  "catalog": { "apps": ["…18 个应用摘要"], "categories": ["…分类树"] },
   "items": [
     { "appId": "wps-office", "version": "12.1.0", "relativePath": "wps-office/12.1.0.msi",
       "sizeBytes": 481280, "sha256": "…", "status": "saved", "attempts": 1 }
@@ -266,9 +268,16 @@ flowchart LR
 | --- | --- | --- |
 | 静态检查 | `npm run typecheck` | `tsc -p tsconfig.json` 全仓严格检查 |
 | **Emoji 基线** | `npm run check:emoji` | 基线：全仓文本源零 emoji，Web UI 零字符图形图标（一律内联 SVG），违规即红 |
-| 单测/集成 | `npm test` | 222 项：引擎、服务端、bridge、图标、端到端 |
+| 文档引用落地 | `npm run check:links` | 公开文档、Web 根与 wiki 的本地引用必须能在发布出来的树里落地 |
+| 依赖许可自审 | `npm run check:licenses` | 直接依赖的 license 必须在宽松白名单内；缺字段或含 copyleft 成分即拒 |
+| 覆盖只增不减 | `npm run check:coverage` | 与父提交比较测试文件数，下降即红并点名；拿不到父提交（浅克隆）也算红，不当绿。有意合并/删除请在提交信息里写 coverage-drop 并说明去向 |
+| 提交信息禁词 | `npm run check:commits` | 提交信息不是文件，`git grep HEAD` 查不到它；词表与文件级那步同一把尺子（由测试钉住） |
+| 单测/集成 | `npm test` | 引擎、服务端、bridge、图标、端到端；CI 另断言「用例数下限」——`node --test` 的 glob 退化到 0 条时仍 exit 0，绿不等于跑过 |
 | 冒烟 | `npm run smoke` | 真机注册表清单扫描 + CLI IPC 链路 |
 | 演示与截图 | `npm run demo` / `npm run shots` | 本地复现 CI 的截图产物（fresh 皮肤 1237×762） |
+
+整链一条命令：`npm run ci`（上表顺序串起来）。另外 push 前建议跑 `npm run check:delivery`，
+它列出「还没进仓库」的文件——CI 只看得到已提交的内容，漏 `git add` 的测试不会让任何人变红。
 
 两个 job 都有 `timeout-minutes` 上限，防止挂起的测试拖穿额度；截图产物随每次 CI 可下载比对（保留 14 天）。
 
@@ -347,10 +356,25 @@ node --experimental-transform-types scripts/verify-cleanup.mts
 | 对标 | 借鉴点 | 落在哪 |
 | --- | --- | --- |
 | **VS Code** 的 README/文档结构 | 徽章 → 一句话定位 → 截图 → 架构图 → 快速开始 → 设计原则的叙述顺序 | 本 README 章节编排 |
-| **Microsoft Store / 应用商店类客户端** | 首页三层结构（运营位 → 必备应用 → 分类聚合卡）、按钮三态语义（打开/一键安装/手动安装） | 首页布局与 [UI-ROUND3.md](UI-ROUND3.md) |
+| **Microsoft Store / 应用商店类客户端** | 首页三层结构（运营位 → 必备应用 → 分类聚合卡）、按钮三态语义（打开/一键安装/手动安装） | 首页布局与交互模式 |
 | **Ant Design** 的 token 化设计 | 皮肤=token 覆盖表、间距/圆角/字号全部走 CSS 变量，缺省回落并被显式记录 | `theme/skin.ts`、`app.css` |
 | **Tauri** 的轻量分发思路 | 不内置 Electron，Web UI 可被 WebView/Tauri/WinForms 任一宿主包裹 | `packages/app` 与 src-tauri 骨架 |
 | **Homebrew / winget** 的清单思想 | 安装包 + sha256 + 元数据的自描述 manifest，离线可审计 | `localrepo/`、[LOCAL-REPO.md](LOCAL-REPO.md) |
+
+## 兼容性
+
+- **运行时**：Node.js ≥ 24（`--experimental-transform-types` 直接跑 TS，仓库里没有构建产物）。
+- **完整功能面需要 Windows**：本机已装清单与残留扫描走 `reg.exe` 与注册表根、托盘与窗口宿主走 PowerShell、
+  卸载/安装提权走 UAC。这些在 `packages/core/src/inventory`、`leftover`、`packages/app` 内。
+- **其余平台可用**：目录服务端、检索与评分、下载与校验、安装计划生成、审批与凭证、皮肤 token、RPC 协议与 CLI
+  都是平台无关的纯 TypeScript；测试套件里依赖 Windows 的用例自带平台跳过，Linux 作业（`verify-linux`）跑同一套断言。
+- 界面基于公开的 Web 标准实现，不依赖任何专有控件；图标一律内联 SVG。
+
+## 贡献与安全
+
+- 贡献流程、提交前自查（emoji 基线、公开面引用完整性、用例数下限）见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- 漏洞报告方式与处理时限见 [SECURITY.md](SECURITY.md)。本地 RPC 桥只绑回环、管理端点 fail-closed，
+  这两条都有回归用例钉住，改动把它们放开会让测试变红。
 
 ## 许可
 

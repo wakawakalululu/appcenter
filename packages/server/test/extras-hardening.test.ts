@@ -1,6 +1,7 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
@@ -9,19 +10,24 @@ import { CatalogDb, createApi } from "../src/server.ts";
 let base = "";
 let server: ReturnType<typeof createApi>;
 let db: CatalogDb;
+let dataDir = "";
 
 const textOf = (response: Response): Promise<string> => response.text();
 
 before(async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "extras-"));
-  db = CatalogDb.open(path.join(dir, "t.db"));
-  server = createApi({ db, packageRoot: dir, adminToken: "admin" });
+  dataDir = await mkdtemp(path.join(tmpdir(), "extras-"));
+  db = CatalogDb.open(path.join(dataDir, "t.db"));
+  server = createApi({ db, packageRoot: dataDir, adminToken: "admin" });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = "http://127.0.0.1:" + String((server.address() as AddressInfo).port);
 });
 
-after(() => {
-  server.close();
+after(async () => {
+  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  // 顺序是这条收尾的全部：SQLite 句柄不关，Windows 上删整个目录就是 EBUSY（上一轮整链就是这么红的）。
+  // 也不把删除交给共享回收器——那要赌它的 after() 排在本钩子之后，而注册顺序不是这里该依赖的东西。
+  db.raw().close();
+  await rm(dataDir, { recursive: true, force: true });
 });
 
 const post = (p: string, body: unknown, token = "admin") =>

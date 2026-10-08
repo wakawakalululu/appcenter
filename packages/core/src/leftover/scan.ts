@@ -39,6 +39,19 @@ export interface ResidueReport {
   items: ResidueItem[];
   /** 按类别计数，与界面上的「残留项统计: 注册表=n, 服务=n ...」行对齐。 */
   counts: Record<ResidueKind, number>;
+  /**
+   * 本次**没扫到**的部分。非空就意味着 items/counts 是「少扫之后」的结果，
+   * 而「少扫一段」与「这台机器真没有残留」在界面上长得一模一样——
+   * 报告又直接喂破坏性清理，所以必须以显式缺口记录，而不是靠整段抛错。
+   */
+  gaps?: ResidueGap[];
+}
+
+/** 一个扫描缺口：哪一类、哪个源、为什么没读到。 */
+export interface ResidueGap {
+  kind: ResidueKind;
+  source: string;
+  error: string;
 }
 
 export interface FileSystemProbe {
@@ -172,6 +185,7 @@ async function collectTaskDefinitions(fs: FileSystemProbe, root: string, limit =
  */
 export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<ResidueReport> {
   const items: ResidueItem[] = [];
+  const gaps: ResidueGap[] = [];
   const durationMs = Object.fromEntries(KINDS.map((kind) => [kind, 0])) as Record<ResidueKind, number>;
   const exe = executableOf(app);
   const anchors = [app.registryPath, app.installLocation ?? "", exe ?? ""].filter(Boolean);
@@ -179,8 +193,25 @@ export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<Re
 
   const timed = async (kind: ResidueKind, work: () => Promise<void>): Promise<void> => {
     const started = Date.now();
-    await work();
+    try {
+      await work();
+    } catch (err) {
+      // 整段失败不再掀掉这次扫描：留下缺口，由清理计划据此拒绝执行。
+      // 旧写法让任一根的 reg.exe 报错就把整份报告变成 rejected，用户看到的是「残留扫描不可用」，
+      // 而不是「这段没读到」——两种情况在修复前都不可区分。
+      gaps.push({ kind, source: "phase:" + kind, error: errorMessageOf(err) });
+    }
     durationMs[kind] = Date.now() - started;
+  };
+
+  /** 逐根取数，单根失败只丢这一根并记缺口：别的根已经读到的结果不能被一起丢掉。 */
+  const treeOf = async (kind: ResidueKind, rootPath: string): Promise<RegistryKey[]> => {
+    try {
+      return await deps.reg.queryTree(rootPath);
+    } catch (err) {
+      gaps.push({ kind, source: rootPath, error: errorMessageOf(err) });
+      return [];
+    }
   };
 
   await timed("registry", async () => {
@@ -201,7 +232,7 @@ export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<Re
     if (app.regDir && !app.regDir.startsWith("{")) {
       const vendorRoots = vendorConfigRoots(app.regDir);
       // 三个厂商配置根并行查询，省掉两次串行的进程启动往返。
-      const dumps = await Promise.all(vendorRoots.map((root) => deps.reg.queryTree(root)));
+      const dumps = await Promise.all(vendorRoots.map((root) => treeOf("registry", root)));
       const candidates: RegistryKey[] = [];
       for (const dump of dumps) candidates.push(...dump);
       for (const key of candidates) {
@@ -249,7 +280,7 @@ export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<Re
 
   await timed("startup", async () => {
     // 四个启动项根并行取数，再按原顺序处理，保证结果顺序不变。
-    const dumps = await Promise.all(RUN_ROOTS.map((root) => deps.reg.queryTree(root)));
+    const dumps = await Promise.all(RUN_ROOTS.map((root) => treeOf("startup", root)));
     for (let index = 0; index < RUN_ROOTS.length; index++) {
       for (const key of dumps[index] ?? []) {
         for (const value of key.values) {
@@ -352,7 +383,9 @@ export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<Re
 
   await timed("contextmenu", async () => {
     const found = await scanContextMenu(app, deps.reg, (candidate) => references(anchors, candidate) || (exeName !== "" && basename(candidate) === exeName));
-    items.push(...found);
+    items.push(...found.items);
+    // 逐根/逐 CLSID 的缺口带上来，粒度比整段兜底细：一个坏键只停用它自己。
+    gaps.push(...found.gaps);
   });
 
   const seen = new Set<string>();
@@ -373,7 +406,12 @@ export async function scanResidue(app: InstalledApp, deps: ScanDeps): Promise<Re
     durationMs,
     items: unique,
     counts,
+    gaps,
   };
+}
+
+function errorMessageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function valueOf(key: RegistryKey, name: string): string | null {

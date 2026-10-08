@@ -1,13 +1,15 @@
 import { test } from "node:test";
+import { tmpdir } from "node:os";
+import { mkdtemp } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { CatalogDb, createApi, seedDemo } from "@appcenter/server";
 import { createBridge } from "../src/bridge.ts";
 import { AppCenterFacade, UNINSTALL_ROOTS, regKey, type WindowHost } from "@appcenter/core";
+import { makeTrackedTmp } from "../../core/test/util/tmp-dirs.ts";
 
 class NullHost implements WindowHost {
   async create(): Promise<string> { return "win-1"; }
@@ -26,13 +28,13 @@ const webRoot = path.resolve(fileURLToPath(import.meta.url), "..", "..", "web");
 async function startBridge(): Promise<{ base: string; close: () => Promise<void>; rpc: (init?: RequestInit) => Promise<{ status: number; body: string }> }> {
   const db = CatalogDb.memory("csrf-secret");
   seedDemo(db);
-  const catalogApi = createApi({ db, packageRoot: await mkdtemp(path.join(tmpdir(), "csrf-pkgs-")), adminToken: "admin" });
+  const catalogApi = createApi({ db, packageRoot: await makeTrackedTmp("csrf-pkgs-"), adminToken: "admin" });
   const catalogPort = await new Promise<number>((resolve) => catalogApi.listen(0, "127.0.0.1", () => resolve((catalogApi.address() as AddressInfo).port)));
   const facade = new AppCenterFacade(
     {
       serverUrl: "http://127.0.0.1:" + String(catalogPort),
       userId: "me",
-      dataDir: await mkdtemp(path.join(tmpdir(), "csrf-data-")),
+      dataDir: await makeTrackedTmp("csrf-data-"),
       appVersion: "1.0.0",
       registryKeys: [regKey((UNINSTALL_ROOTS[0]?.path ?? "") + "\\Wps", { DisplayName: "WPS Office", DisplayVersion: "12.0.0", Publisher: "金山办公" })],
     },

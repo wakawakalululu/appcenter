@@ -5,9 +5,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import type { AppDetail, AppSummary, AppVersion, Category, RatingInput, SilentSpec } from "@appcenter/core";
-import { toDistribution } from "@appcenter/core";
-import { handleExtras } from "./extras.ts";
+import { joinWithinRoot, safePathSegment, toDistribution } from "@appcenter/core";
+import { handleExtras, scopedApplicant } from "./extras.ts";
 import { authorize, createUser, ensureAuthSchema, issueToken, recordAudit, visibleAppIds, type Principal } from "./auth.ts";
+import { listAudit, toCsv, toJson } from "./audit.ts";
 
 const SCHEMA: string[] = [
   "CREATE TABLE IF NOT EXISTS categories (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, sort_order INTEGER NOT NULL DEFAULT 0)",
@@ -19,8 +20,10 @@ const SCHEMA: string[] = [
 ];
 
 function signGrantPayload(payload: Omit<ImportedGrant, "signature">, secret: string): string {
+  // 字段顺序必须与 core 的 ApprovalWorkflow.payloadOf 完全一致。
+  // appVersion 也在载荷里：审批请求本来就是按版本建的，凭证不绑版本就等于批一次装任意版本。
   return createHmac("sha256", secret)
-    .update([payload.appId, payload.userId, payload.issuedAt, payload.expiresAt, payload.token].join("|"))
+    .update([payload.appId, payload.userId, payload.appVersion, payload.issuedAt, payload.expiresAt, payload.token].join("|"))
     .digest("hex");
 }
 
@@ -28,6 +31,7 @@ export interface ImportedGrant {
   token: string;
   appId: string;
   userId: string;
+  appVersion: string;
   issuedAt: string;
   expiresAt: string;
   signature: string;
@@ -244,6 +248,7 @@ export class CatalogDb {
       token: createHash("sha256").update(id + Date.now()).digest("hex").slice(0, 32),
       appId: String(row.app_id),
       userId: String(row.applicant),
+      appVersion: String(row.app_version),
       issuedAt: new Date().toISOString(),
       expiresAt,
     };
@@ -257,7 +262,23 @@ export class CatalogDb {
   }
 
   approvalsOf(applicant: string): Record<string, unknown>[] {
-    return this.db.prepare("SELECT id, app_id, app_version, status, reason, created_at, decided_at FROM approvals WHERE applicant = ? ORDER BY created_at DESC").all(applicant) as Record<string, unknown>[];
+    return this.db
+      .prepare("SELECT id, app_id, app_version, applicant, status, reason, created_at, decided_at, decided_by, expires_at FROM approvals WHERE applicant = ? ORDER BY created_at DESC")
+      .all(applicant) as Record<string, unknown>[];
+  }
+
+  /** 管理员全量视图：不按申请人过滤。 */
+  listAllApprovals(): Record<string, unknown>[] {
+    return this.db
+      .prepare("SELECT id, app_id, app_version, applicant, status, reason, created_at, decided_at, decided_by, expires_at FROM approvals ORDER BY created_at DESC")
+      .all() as Record<string, unknown>[];
+  }
+
+  revokeApproval(id: string): boolean {
+    const result = this.db
+      .prepare("UPDATE approvals SET status = 'revoked' WHERE id = ? AND status IN ('pending', 'approved', 'granted')")
+      .run(id);
+    return Number(result.changes ?? 0) > 0;
   }
 
   /** 连同版本一起删，避免孤儿记录残留在 versions 表里。 */
@@ -285,6 +306,22 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   } catch {
     return {};
   }
+}
+
+/** 审批工单统一投影：申请人视图与管理员视图共用同一形状。 */
+function approvalTicket(r: Record<string, unknown>): Record<string, string> {
+  return {
+    requestId: String(r.id),
+    appId: String(r.app_id),
+    appVersion: String(r.app_version ?? ""),
+    applicant: String(r.applicant ?? ""),
+    status: String(r.status),
+    reason: String(r.reason),
+    createdAt: String(r.created_at),
+    decidedAt: r.decided_at ? String(r.decided_at) : "",
+    decidedBy: r.decided_by ? String(r.decided_by) : "",
+    expiresAt: r.expires_at ? String(r.expires_at) : "",
+  };
 }
 
 /** Range 支持：客户端下载器据此续传。 */
@@ -423,17 +460,29 @@ export function createApi(options: ServerOptions) {
       }
       if (url.pathname === "/api/approvals" && method === "POST") {
         const body = await readBody(req);
+        // applicant 由客户端自报 ⇒ 带身份的调用者一律收口到自己，别让人替别人提申请。
+        const who = principalOf(req);
+        const declared = String(body.applicant ?? "");
+        if (who && who.role !== "admin" && declared && declared !== who.userId) return json(res, 403, { error: "applicant mismatch" });
         const id = db.createApproval({
           appId: String(body.appId ?? ""),
           appVersion: String(body.appVersion ?? ""),
-          applicant: String(body.applicant ?? ""),
+          applicant: who && who.role !== "admin" ? who.userId : declared,
           reason: String(body.reason ?? ""),
         });
         return json(res, 201, { requestId: id, status: "pending" });
       }
       if (url.pathname === "/api/approvals" && method === "GET") {
-        const rows = db.approvalsOf(url.searchParams.get("applicant") ?? "");
-        return json(res, 200, rows.map((r) => ({ requestId: String(r.id), appId: String(r.app_id), status: String(r.status), reason: String(r.reason) })));
+        const who = principalOf(req);
+        const requested = url.searchParams.get("applicant") ?? "";
+        // 管理员查全量：不带 applicant 即返回所有工单（含他人），供审批工作台用。
+        if (who && who.role === "admin" && !requested) {
+          return json(res, 200, db.listAllApprovals().map(approvalTicket));
+        }
+        const scoped = scopedApplicant(who, requested);
+        if ("denied" in scoped) return json(res, 403, { error: scoped.denied });
+        const rows = db.approvalsOf(scoped.applicant);
+        return json(res, 200, rows.map(approvalTicket));
       }
       if (/^\/api\/approvals\/[^/]+\/decide$/.test(url.pathname) && method === "POST") {
         if (!requireAdmin(req)) return json(res, 403, { error: "admin token required" });
@@ -446,8 +495,23 @@ export function createApi(options: ServerOptions) {
       }
       if (/^\/api\/approvals\/[^/]+\/grant$/.test(url.pathname) && method === "POST") {
         const id = decodeURIComponent(url.pathname.split("/")[3] ?? "");
+        // decide 要 admin，grant 却谁都能调：只要拿到一张已批准的单号，任何人都能替别人
+        // 铸出安装凭证（grant.userId 取的是原申请人），等于把整个审批门禁绕开。
+        const who = principalOf(req);
+        if (who && who.role !== "admin") {
+          const row = db.raw().prepare("SELECT applicant FROM approvals WHERE id = ?").get(id) as { applicant: string } | undefined;
+          if (!row) return json(res, 404, { error: "no such request" });
+          if (row.applicant !== who.userId) return json(res, 403, { error: "not your request" });
+        }
         const grant = db.issueGrant(id);
         return grant ? json(res, 200, grant) : json(res, 409, { error: "grant unavailable, request is not approved" });
+      }
+      if (/^\/api\/approvals\/[^/]+\/revoke$/.test(url.pathname) && method === "POST") {
+        if (!requireAdmin(req)) return json(res, 403, { error: "admin token required" });
+        const id = decodeURIComponent(url.pathname.split("/")[3] ?? "");
+        const ok = db.revokeApproval(id);
+        if (ok) recordAudit(db.raw(), "admin", "approval.revoke", id);
+        return json(res, ok ? 200 : 409, { ok });
       }
       if (/^\/api\/admin\/apps\/[^/]+$/.test(url.pathname) && method === "DELETE") {
         if (!requireAdmin(req)) return json(res, 403, { error: "admin token required" });
@@ -489,6 +553,38 @@ export function createApi(options: ServerOptions) {
         recordAudit(db.raw(), "admin", "self_update.publish", String(body.version ?? ""));
         return json(res, 201, { ok: true });
       }
+      if (url.pathname === "/api/admin/audit" && method === "GET") {
+        if (!requireAdmin(req)) return json(res, 403, { error: "admin token required" });
+        const result = listAudit(db.raw(), {
+          from: url.searchParams.get("from") ?? undefined,
+          to: url.searchParams.get("to") ?? undefined,
+          action: url.searchParams.get("action") ?? undefined,
+          actor: url.searchParams.get("actor") ?? undefined,
+          page: url.searchParams.get("page") ? Number(url.searchParams.get("page")) : undefined,
+          pageSize: url.searchParams.get("pageSize") ? Number(url.searchParams.get("pageSize")) : undefined,
+        });
+        return json(res, 200, result);
+      }
+      if (url.pathname === "/api/admin/audit/export" && method === "GET") {
+        if (!requireAdmin(req)) return json(res, 403, { error: "admin token required" });
+        const format = url.searchParams.get("format") === "json" ? "json" : "csv";
+        // 导出不分页，但受 maxPageSize 上限保护，避免一次性拼出超大规模内存体。
+        const all = listAudit(db.raw(), {
+          from: url.searchParams.get("from") ?? undefined,
+          to: url.searchParams.get("to") ?? undefined,
+          action: url.searchParams.get("action") ?? undefined,
+          actor: url.searchParams.get("actor") ?? undefined,
+          pageSize: 200000,
+          maxPageSize: 200000,
+        });
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        if (format === "csv") {
+          res.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="audit-${stamp}.csv"` });
+          return res.end(toCsv(all.rows));
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8", "content-disposition": `attachment; filename="audit-${stamp}.json"` });
+        return res.end(toJson(all.rows));
+      }
       if (await handleExtras({ db: db.raw(), requireAdmin, principal: principalOf }, req, res, url)) return undefined;
       return json(res, 404, { error: "no route " + method + " " + url.pathname });
     })().catch((err: unknown) => json(res, 500, { error: err instanceof Error ? err.message : String(err) }));
@@ -504,7 +600,6 @@ export function seedDemo(db: CatalogDb): void {
   db.upsertCategory({ id: "media", name: "影音娱乐", parentId: null, sortOrder: 4 });
   db.upsertCategory({ id: "media-music", name: "音乐", parentId: "media", sortOrder: 1 });
   db.upsertCategory({ id: "media-video", name: "视频", parentId: "media", sortOrder: 2 });
-  db.upsertCategory({ id: "mobile", name: "移动专区", parentId: null, sortOrder: 5 });
   db.upsertCategory({ id: "other", name: "其他", parentId: null, sortOrder: 90 });
 
   const msi: SilentSpec = { kind: "msi", installArgs: ["/i", "{file}", "/qn", "/norestart"], uninstallArgs: ["/x", "{file}", "/qn", "/norestart"], requiresAdmin: true };
@@ -559,29 +654,6 @@ export function seedDemo(db: CatalogDb): void {
       versions: [
         { version: "12.1.0", releasedAt: "2026-09-20", sizeBytes: 320 * mb, sha256: "a".repeat(64), downloadUrl: "/dl/wps-12.1.0.msi", releaseNotes: "修复表格卡顿", silent: msi },
         { version: "12.0.0", releasedAt: "2026-06-11", sizeBytes: 318 * mb, sha256: "b".repeat(64), downloadUrl: "/dl/wps-12.0.0.msi", releaseNotes: "首版上架", silent: msi },
-      ],
-    },
-    {
-      detail: {
-        id: "mobile-desktop",
-        name: "移动云桌面",
-        searchKeys: ["mobile", "cloud", "yidong"],
-        publisher: "云屏科技",
-        categoryId: "mobile",
-        iconUrl: gen("mobile-desktop"),
-        latestVersion: "2.6.0",
-        downloadCount: 4300,
-        badge: "exclusive",
-        tags: ["云电脑", "大屏"],
-        requiresApproval: false,
-        sizeBytes: 130 * mb,
-        description: "把移动应用投到桌面大屏继续用，专属通道免配置。",
-        screenshots: [],
-        versions: [],
-      },
-      versions: [
-        { version: "2.6.0", releasedAt: "2026-09-28", sizeBytes: 130 * mb, sha256: "9".repeat(64), downloadUrl: "/dl/mobile-2.6.0.exe", releaseNotes: "提升串流清晰度", silent: inno },
-        { version: "2.5.1", releasedAt: "2026-08-02", sizeBytes: 128 * mb, sha256: "8".repeat(64), downloadUrl: "/dl/mobile-2.5.1.exe", releaseNotes: "修复断连", silent: inno },
       ],
     },
     {
@@ -688,12 +760,12 @@ export function seedDemo(db: CatalogDb): void {
         requiresApproval: false,
         installMode: "manual",
         sizeBytes: 180 * mb,
-        description: "病毒查杀与勒索防护一体，向导安装后按终端策略自动接管。",
+        description: "病毒查杀与实时防护一体，向导式安装，装完即用。",
         screenshots: [],
         versions: [],
       },
       versions: [
-        { version: "9.0.2", releasedAt: "2026-09-30", sizeBytes: 180 * mb, sha256: "4".repeat(64), downloadUrl: "/dl/guard-9.0.2.exe", releaseNotes: "勒索防护规则更新", silent: inno },
+        { version: "9.0.2", releasedAt: "2026-09-30", sizeBytes: 180 * mb, sha256: "4".repeat(64), downloadUrl: "/dl/guard-9.0.2.exe", releaseNotes: "病毒库与防护规则更新", silent: inno },
       ],
     },
     {
@@ -732,7 +804,7 @@ export function seedDemo(db: CatalogDb): void {
         tags: ["网络", "受限"],
         requiresApproval: true,
         sizeBytes: 24 * mb,
-        description: "受管控软件，安装前需要提交申请。",
+        description: "需要审批的软件，安装前请先提交申请。",
         screenshots: [],
         versions: [],
       },
@@ -754,8 +826,6 @@ export function seedDemo(db: CatalogDb): void {
     { detail: { id: "audio-editor", name: "音频剪辑", searchKeys: ["audio", "editor"], publisher: "光影工坊", categoryId: "media-music", iconUrl: gen("audio-editor"), latestVersion: "4.0.2", downloadCount: 6800, badge: "normal", tags: ["音频"], requiresApproval: false, sizeBytes: 88 * mb, description: "多轨录音与降噪剪辑。", screenshots: [], versions: [] }, versions: [{ version: "4.0.2", releasedAt: "2026-08-22", sizeBytes: 88 * mb, sha256: "m".repeat(64), downloadUrl: "/dl/audio-4.0.2.exe", releaseNotes: "降噪增强", silent: nsis }] },
     { detail: { id: "stream-rec", name: "直播录制", searchKeys: ["stream", "record"], publisher: "映速传媒", categoryId: "media-video", iconUrl: gen("stream-rec"), latestVersion: "3.3.0", downloadCount: 6500, badge: "normal", tags: ["直播"], requiresApproval: false, sizeBytes: 102 * mb, description: "一键抓取并剪辑直播回放。", screenshots: [], versions: [] }, versions: [{ version: "3.3.0", releasedAt: "2026-08-24", sizeBytes: 102 * mb, sha256: "n".repeat(64), downloadUrl: "/dl/stream-3.3.0.exe", releaseNotes: "画质提升", silent: nsis }] },
     { detail: { id: "video-convert", name: "视频转换", searchKeys: ["convert", "video"], publisher: "映速传媒", categoryId: "media-video", iconUrl: gen("video-convert"), latestVersion: "2.7.1", downloadCount: 5200, badge: "normal", tags: ["转换"], requiresApproval: false, sizeBytes: 94 * mb, description: "批量格式转换与压缩。", screenshots: [], versions: [] }, versions: [{ version: "2.7.1", releasedAt: "2026-08-26", sizeBytes: 94 * mb, sha256: "o".repeat(64), downloadUrl: "/dl/convert-2.7.1.exe", releaseNotes: "批量加速", silent: nsis }] },
-    { detail: { id: "phone-mirror", name: "手机镜像", searchKeys: ["mirror", "phone"], publisher: "云屏科技", categoryId: "mobile", iconUrl: gen("phone-mirror"), latestVersion: "1.9.0", downloadCount: 3900, badge: "normal", tags: ["镜像"], requiresApproval: false, sizeBytes: 76 * mb, description: "把手机画面镜像到桌面。", screenshots: [], versions: [] }, versions: [{ version: "1.9.0", releasedAt: "2026-08-28", sizeBytes: 76 * mb, sha256: "p".repeat(64), downloadUrl: "/dl/mirror-1.9.0.exe", releaseNotes: "低延迟", silent: nsis }] },
-    { detail: { id: "app-lite", name: "应用商店精简版", searchKeys: ["store", "app"], publisher: "云屏科技", categoryId: "mobile", iconUrl: gen("app-lite"), latestVersion: "1.2.3", downloadCount: 3600, badge: "normal", tags: ["商店"], requiresApproval: false, sizeBytes: 54 * mb, description: "轻量应用分发与更新。", screenshots: [], versions: [] }, versions: [{ version: "1.2.3", releasedAt: "2026-08-30", sizeBytes: 54 * mb, sha256: "q".repeat(64), downloadUrl: "/dl/applite-1.2.3.exe", releaseNotes: "首版上架", silent: nsis }] },
   ];
   for (const entry of extraApps) db.upsertApp(entry.detail, entry.versions);
 
@@ -770,7 +840,6 @@ export function seedDemo(db: CatalogDb): void {
     ["music-player", "u4", 4, true, "占内存略高", "2026-09-26"],
     ["video-player", "u1", 4, true, "弹幕流畅", "2026-09-27"],
     ["video-player", "u2", 5, true, "缓存快", "2026-09-27"],
-    ["mobile-desktop", "u1", 4, true, "延迟可接受", "2026-09-28"],
     ["cloud-notes", "u1", 4, true, "模板实用", "2026-09-29"],
     ["cloud-notes", "u2", 4, true, "同步稳", "2026-09-29"],
     ["endpoint-guard", "u1", 5, true, "安静不弹窗", "2026-09-30"],
@@ -787,14 +856,33 @@ export function seedDemo(db: CatalogDb): void {
  * sha256/size 回写版本表，让下载校验链路（Range 续传 → sha256 比对 → 落地）可以真跑通。
  * 只服务于 demo/测试环境——生产环境的包由发布方上传。
  */
-export function materializeDemoPackages(db: CatalogDb, packageRoot: string): { files: number; bytes: number } {
+/**
+ * 演示目录里的 sha256 是「同一个字符重复 64 遍」的占位值（seedDemo 用到 a–h 都有，
+ * 不只十六进制位，所以字符类不能收窄成 [0-9a-f]）。真包出现这种值的概率约 36/2^256，
+ * 可以当作可靠的判别式。
+ */
+const DEMO_PLACEHOLDER_SHA = /^([0-9a-z])\1{63}$/i;
+
+export function materializeDemoPackages(
+  db: CatalogDb,
+  packageRoot: string,
+  options: { force?: boolean } = {},
+): { files: number; bytes: number; skipped: number } {
   mkdirSync(packageRoot, { recursive: true });
   let files = 0;
   let bytes = 0;
+  let skipped = 0;
   for (const summary of db.summaries()) {
     const detail = db.detail(summary.id);
     if (!detail) continue;
     for (const version of detail.versions) {
+      // 带真实校验值的版本一律不碰：这个函数是给演示目录造占位包的，
+      // 一旦跑在真目录库上，把真 installers 的 size/sha256 覆成 96–480KB 的伪随机体，
+      // 之后每次真装都会校验失败——而且原来那对值无从找回。
+      if (!options.force && !DEMO_PLACEHOLDER_SHA.test(version.sha256)) {
+        skipped += 1;
+        continue;
+      }
       const seed = detail.id + "@" + version.version;
       let hash = 2166136261;
       for (const ch of seed) {
@@ -807,12 +895,16 @@ export function materializeDemoPackages(db: CatalogDb, packageRoot: string): { f
       header.copy(body, 0);
       const pattern = createHash("sha256").update(seed).digest();
       for (let i = header.length; i < size; i++) body[i] = pattern[i % pattern.length]! ^ (i & 0xff);
-      const fileName = version.downloadUrl.split("?")[0]?.split("/").pop() ?? seed + ".bin";
-      writeFileSync(path.join(packageRoot, fileName), body);
+      // downloadUrl 是目录侧给的字符串：只按 `/` 切的话 `..\..\x.exe` 会整段活下来，
+      // 在 Windows 上被 path.join 解释成逃逸（实测真写出到 packageRoot 之外）。
+      const base = (version.downloadUrl.split("?")[0] ?? version.downloadUrl).split(/[\\/]+/).pop() ?? "";
+      const fileName = safePathSegment(base, seed) || seed + ".bin";
+      const target = joinWithinRoot(packageRoot, fileName);
+      writeFileSync(target, body);
       db.putVersion(detail.id, { ...version, sizeBytes: size, sha256: createHash("sha256").update(body).digest("hex") });
       files += 1;
       bytes += size;
     }
   }
-  return { files, bytes };
+  return { files, bytes, skipped };
 }

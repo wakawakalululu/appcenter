@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 import { parseShellLink } from "../packages/core/src/index.ts";
 
-const line = (s: string): void => process.stdout.write(s + "\n");
+const line = (s: string): void => { process.stdout.write(s + "\n"); };
 const u16 = (b: Buffer, o: number): number => (o + 2 <= b.length ? b.readUInt16LE(o) : 0);
 const u32 = (b: Buffer, o: number): number => (o + 4 <= b.length ? b.readUInt32LE(o) : 0);
 function ansiZ(b: Buffer, o: number): string {
@@ -14,7 +15,7 @@ const looksPath = (s: string): boolean => /^[a-z]:\\/i.test(s) || /^\\\\/i.test(
 
 async function findLnks(dir: string, acc: string[], depth: number): Promise<void> {
   if (depth > 6) return;
-  let entries: Awaited<ReturnType<typeof fs.readdir<{ withFileTypes: true }>>>;
+  let entries: Dirent[];
   try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
     const full = path.join(dir, e.name);

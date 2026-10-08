@@ -17,7 +17,9 @@ PACKAGE_ROOT=/srv/packages \
 
 ## 令牌与角色
 
-管理类接口需要 `Authorization: Bearer <token>`。令牌有两种来源：
+管理类接口需要 `Authorization: Bearer <token>`。**写入类的客户端接口同样需要**（安装回执、资产心跳），
+且是先验身份再读请求体——未认证的调用拿的是 401，不会让服务端去 buffer 它的载荷。
+注意一条 fail-closed 的后果：没配 ADMIN_TOKEN 的部署里主体恒为空，这类写入一律 401（要跑无鉴权演示请显式传 `allowUnauthenticatedAdmin`）。令牌有两种来源：
 
 - 静态管理员令牌：直接使用 ADMIN_TOKEN 的值。
 - 用户令牌：POST /api/login 签发，携带 role（user / admin）。库内只存令牌哈希。
@@ -39,8 +41,8 @@ curl -X POST http://127.0.0.1:7991/api/login \
 | GET | /api/banners | 运营位 |
 | GET | /api/bundles | 捆绑包（装机套装） |
 | GET | /api/self-update | 已发布的客户端新版本清单 |
-| POST | /api/apps/:id/receipt | 客户端上报安装回执 |
-| POST | /api/heartbeat | 客户端上报本机资产心跳（按 machineId 幂等） |
+| POST | /api/apps/:id/receipt | 客户端上报安装回执（需 Bearer 令牌） |
+| POST | /api/heartbeat | 客户端上报本机资产心跳（按 machineId 幂等，需 Bearer 令牌） |
 
 ## 审批与通知
 
@@ -75,6 +77,7 @@ curl -X POST http://127.0.0.1:7991/api/login \
 ```bash
 curl -X POST http://127.0.0.1:7991/api/heartbeat \
   -H "content-type: application/json" \
+  -H "authorization: Bearer $APP_CENTER_TOKEN" \
   -d '{"machineId":"pc-01","appVersion":"1.0.0",
        "installed":[{"appId":"wps-office","version":"12.1.0","upgradable":false}],
        "needsApproval":["vpn-client"],

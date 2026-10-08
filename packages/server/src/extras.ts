@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_STALE_AFTER_MS, stalenessOf, type AssetApp, type FleetAgent, type FleetHistoryPoint } from "@appcenter/core";
+import { recordAudit } from "./auth.ts";
 
 /** 每台机器保留的历史心跳条数上限，超出即剪掉最旧的，避免时序表无限膨胀。 */
 const HISTORY_LIMIT = 100;
@@ -99,9 +100,60 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
+/**
+ * 单次请求体的硬上限。`body()` 是把整个请求体读进内存再 parse 的，不设上限就等于让客户端决定服务端占用多少；
+ * 心跳会带安装清单，正常量级几十 KB，1 MiB 已在真实需求之上两个数量级。
+ * 超限返回 null 而不是 `{}`：静默当成空体会让这条上报以「零应用、零待审」落库，那是把攻击变成脏数据。
+ */
+const MAX_BODY_BYTES = 1024 * 1024;
+
+function rejectTooLarge(req: IncomingMessage, res: ServerResponse): Promise<null> {
+  const payload = JSON.stringify({ error: "payload too large" });
+  // 两条承诺要同时成立：
+  // ① 「不等待请求体」——状态与头立刻写出（`Content-Length 声明超限就该马上拒`那条用例一个字节都不发，靠的就是这个）；
+  // ② 客户端必须真的收到 413，而不是连接被重置。
+  // 旧写法在这里 writeHead+res.end() 并带 `connection: close`：Node 在响应结束时就销毁 socket，
+  // 而 3 MiB 还在上传，客户端拿到的是 fetch failed / ECONNRESET（隔离重跑 6 轮红 2 轮实测到的就是这个）。
+  // 只加 req.resume() 不够（同样 2/6 红，已被测量否掉），因为销毁 socket 的是 connection: close 那条决定。
+  // 现在：头先出、把还在飞的字节读完丢弃、等请求结束（或有界 250ms 兜底，客户端 dribble 也不能让我们永挂）之后再结束响应。
+  res.writeHead(413, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": String(Buffer.byteLength(payload)),
+  });
+  req.resume();
+  return new Promise<null>((resolve) => {
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      if (!res.writableEnded) res.end(payload);
+      resolve(null);
+    };
+    req.on("end", finish);
+    req.on("close", finish);
+    req.on("aborted", finish);
+    setTimeout(finish, 250).unref();
+  });
+}
+
+async function body(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | null> {
+  const declared = Number(req.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return rejectTooLarge(req, res);
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let size = 0;
+  let oversized = false;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_BODY_BYTES) {
+      oversized = true;
+      // 超限后仍把剩下的字节读完但**丢弃**：立刻回 413 会在客户端还在上传的中途把连接打断，
+      // 实测 fetch 拿到的是 ECONNRESET 而不是我们的状态码——上限该限的是内存，不该限掉可诊断的响应。
+      chunks.length = 0;
+      continue;
+    }
+    if (!oversized) chunks.push(chunk as Buffer);
+  }
+  if (oversized) return rejectTooLarge(req, res);
   if (chunks.length === 0) return {};
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
@@ -121,9 +173,9 @@ export interface ExtrasContext {
  * 通知按申请人取，但 applicant 一直是客户端自报的——任何人都能点名读别人的审批流水
  * （里面带 reason 文本）。带令牌的调用者一律收口到「只能看自己」，admin 例外；
  * 匿名调用维持原样，因为整套部署没配身份时没有更弱的假设可退。
+ * 导出来给 server.ts 的 /api/approvals 复用：同一条规则不该有两份实现。
  */
-function scopedApplicant(ctx: ExtrasContext, req: IncomingMessage, requested: string): { applicant: string } | { denied: string } {
-  const who = ctx.principal(req);
+export function scopedApplicant(who: { userId: string; role: string } | null, requested: string): { applicant: string } | { denied: string } {
   if (!who || who.role === "admin") return { applicant: requested };
   if (requested && requested !== who.userId) return { denied: "applicant mismatch" };
   return { applicant: who.userId };
@@ -144,11 +196,13 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
   }
   if (segments[0] === "api" && segments[1] === "admin" && segments[2] === "banners" && method === "POST") {
     if (!ctx.requireAdmin(req)) return send(res, 403, { error: "admin token required" }), true;
-    const input = await body(req);
+    const input = await body(req, res);
+    if (input === null) return true;
     const id = String(input.id ?? "banner_" + createHash("sha1").update(String(input.title ?? "") + Date.now()).digest("hex").slice(0, 8));
     ctx.db
       .prepare("INSERT INTO banners (id, title, subtitle, image_url, link, sort_order, starts_at, ends_at, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, subtitle=excluded.subtitle, image_url=excluded.image_url, link=excluded.link, sort_order=excluded.sort_order, starts_at=excluded.starts_at, ends_at=excluded.ends_at, active=excluded.active")
       .run(id, String(input.title ?? ""), String(input.subtitle ?? ""), String(input.imageUrl ?? ""), String(input.link ?? ""), Number(input.sortOrder ?? 0), input.startsAt ? String(input.startsAt) : null, input.endsAt ? String(input.endsAt) : null, input.active === false ? 0 : 1);
+    recordAudit(ctx.db, "admin", "banner.upsert", id);
     send(res, 201, { id });
     return true;
   }
@@ -166,13 +220,15 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
   }
   if (segments[0] === "api" && segments[1] === "admin" && segments[2] === "bundles" && method === "POST") {
     if (!ctx.requireAdmin(req)) return send(res, 403, { error: "admin token required" }), true;
-    const input = await body(req);
+    const input = await body(req, res);
+    if (input === null) return true;
     const id = String(input.id ?? "bundle_" + createHash("sha1").update(String(input.title ?? "") + Date.now()).digest("hex").slice(0, 8));
     const appIds = Array.isArray(input.appIds) ? input.appIds.map((v) => String(v)) : [];
     if (appIds.length === 0) return send(res, 400, { error: "appIds must not be empty" }), true;
     ctx.db
       .prepare("INSERT INTO bundles (id, title, subtitle, app_ids, sort_order, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, subtitle=excluded.subtitle, app_ids=excluded.app_ids, sort_order=excluded.sort_order, active=excluded.active")
       .run(id, String(input.title ?? ""), String(input.subtitle ?? ""), JSON.stringify(appIds), Number(input.sortOrder ?? 0), input.active === false ? 0 : 1, new Date().toISOString());
+    recordAudit(ctx.db, "admin", "bundle.upsert", id);
     send(res, 201, { id, appIds });
     return true;
   }
@@ -181,7 +237,11 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
     // 过去这条写路由不校验方法：GET /api/apps/<id>/receipt 也会插一行，
     // 等于任何页面用一个 <img src> 就能伪造回执（CSRF）。
     const appId = decodeSegment(segments[2]);
-    const input = await body(req);
+    // 回执同样是写路由：CSRF 已收口成「只认 POST」，但匿名 POST 依然能凭空造装机结果（版本、成败、退出码、错误文本）。
+    // 与心跳用同一条规则：先验身份，再读体。
+    if (!ctx.principal(req)) return send(res, 401, { error: "bearer token required" }), true;
+    const input = await body(req, res);
+    if (input === null) return true;
     const result = input.result === "failed" ? "failed" : "success";
     const exitCode = input.exitCode === undefined || input.exitCode === null ? null : intOf(input.exitCode, 0);
     const durationMs = input.durationMs === undefined || input.durationMs === null ? null : intOf(input.durationMs, 0);
@@ -199,7 +259,7 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
   }
 
   if (segments[0] === "api" && segments[1] === "notifications" && method === "GET") {
-    const scoped = scopedApplicant(ctx, req, url.searchParams.get("applicant") ?? "");
+    const scoped = scopedApplicant(ctx.principal(req), url.searchParams.get("applicant") ?? "");
     if ("denied" in scoped) return send(res, 403, { error: scoped.denied }), true;
     const rows = ctx.db.prepare("SELECT id, app_id, app_version, status, reason, created_at, notified_done FROM approvals WHERE applicant = ? AND status IN ('pending','approved','granted','rejected') ORDER BY created_at DESC").all(scoped.applicant) as Record<string, unknown>[];
     send(res, 200, rows.map((r) => ({ id: String(r.id), appId: String(r.app_id), appVersion: String(r.app_version), status: String(r.status), reason: String(r.reason), createdAt: String(r.created_at), done: Number(r.notified_done) === 1 })));
@@ -220,7 +280,14 @@ export async function handleExtras(ctx: ExtrasContext, req: IncomingMessage, res
 
   // 机群资产心跳：客户端周期性上报，服务端按 machineId 幂等 upsert 最近一次，并追加一条时序快照。
   if (segments[0] === "api" && segments[1] === "heartbeat" && segments.length === 2 && method === "POST") {
-    const input = await body(req);
+    // 身份先行，再读请求体：反过来就等于让未认证客户端决定服务端要 buffer 多少内存、写进机群表的是什么。
+    // 之前这里既不过 requireAdmin 也不看 principal，任何能连上端口（HOST 允许跨主机时就是局域网）的人
+    // 都能凭空造 installed/upgradable/needsApproval 计数与机器行，并喂脏 heartbeat_history 趋势。
+    // 刻意不开新的逃生口：没配 ADMIN_TOKEN 的部署里 principal 恒为 null，那就报不了心跳（fail-closed，
+    // 与 /api/admin/* 同一条规则）；main.ts 已有的启动警告会把这件事说给运维听。
+    if (!ctx.principal(req)) return send(res, 401, { error: "bearer token required" }), true;
+    const input = await body(req, res);
+    if (input === null) return true;
     const machineId = String(input.machineId ?? "");
     if (!machineId) return send(res, 400, { error: "machineId required" }), true;
     if (machineId.length > MAX_MACHINE_ID_LENGTH) return send(res, 400, { error: "machineId too long" }), true;

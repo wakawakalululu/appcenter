@@ -108,15 +108,21 @@ export async function dispatch(facade: AppCenterFacade, method: string, params: 
       case "app.bulkInstall":
         return { ok: true, result: await facade.bulkInstall((params.appIds as string[] | undefined) ?? []) };
       case "app.uninstall":
-        return { ok: true, result: await facade.uninstall(str("name")) };
+        return { ok: true, result: await facade.uninstall(str("name"), str("regDir") || undefined) };
       case "jobs.list":
         return { ok: true, result: facade.jobs() };
       case "residue.report":
-        return { ok: true, result: await facade.residueReport(str("name")) };
+        return { ok: true, result: await facade.residueReport(str("name"), str("regDir") || undefined) };
       case "cleanup.plan":
         return { ok: true, result: facade.cleanupPlan(params.report as ResidueReport, params.policy as CleanupPolicy) };
       case "cleanup.apply":
         return { ok: true, result: await facade.applyCleanup(params.report as ResidueReport, params.policy as CleanupPolicy, params.dryRun !== false) };
+      case "cleanup.recycle":
+        return { ok: true, result: await facade.recycleStatus() };
+      case "cleanup.recyclePrune":
+        return { ok: true, result: await facade.pruneRecycle({ keepDays: params.keepDays as number | undefined, maxBytes: params.maxBytes as number | undefined, dryRun: params.dryRun === true }) };
+      case "cleanup.recyclePurge":
+        return { ok: true, result: await facade.purgeRecycle(str("confirmToken")) };
       case "cleanup.restore": {
         const set = await readBackupSet(str("backupDir"));
         if (!set) return { ok: false, error: "no backup manifest in " + str("backupDir") };
@@ -125,7 +131,13 @@ export async function dispatch(facade: AppCenterFacade, method: string, params: 
       case "approval.request":
         return { ok: true, result: await facade.requestApproval(str("appId"), str("reason")) };
       case "approval.list":
-        return { ok: true, result: facade.approvalRequests() };
+        return { ok: true, result: await facade.approvalRequests() };
+      case "approval.listAll":
+        return { ok: true, result: await facade.adminApprovalList() };
+      case "approval.decide":
+        return { ok: true, result: await facade.decideApproval(str("requestId"), (str("decision") === "rejected" ? "rejected" : "approved") as "approved" | "rejected", str("note")) };
+      case "approval.revoke":
+        return { ok: true, result: await facade.revokeApproval(str("requestId")) };
       case "approval.attachGrant":
         await facade.attachGrant(str("requestId"));
         return { ok: true, result: true };

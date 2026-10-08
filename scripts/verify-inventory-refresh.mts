@@ -31,7 +31,7 @@ class CountingClient implements RegClient {
 }
 
 const ms = (t0: number): number => Math.round(performance.now() - t0);
-const line = (s: string): void => process.stdout.write(s + "\n");
+const line = (s: string): void => { process.stdout.write(s + "\n"); };
 
 const dir = await mkdtemp(path.join(tmpdir(), "inv-refresh-"));
 try {

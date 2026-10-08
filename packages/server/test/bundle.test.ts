@@ -6,6 +6,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { CatalogDb, createApi, seedDemo } from "../src/server.ts";
+import { makeTrackedTmp } from "../../core/test/util/tmp-dirs.ts";
 import {
   AppCenterFacade,
   UNINSTALL_ROOTS,
@@ -28,7 +29,7 @@ class NoopHost implements WindowHost {
 }
 
 const adminToken = "admin-token";
-const packageRoot = await mkdtemp(path.join(tmpdir(), "bundle-pkgs-"));
+const packageRoot = await makeTrackedTmp("bundle-pkgs-");
 const db = CatalogDb.memory("bundle-secret");
 const server = createApi({ db, packageRoot, adminToken });
 let base = "";
@@ -157,7 +158,7 @@ async function facadeWithRunner(installedPath: string, calls: ExecutionRequest[]
       return { exitCode: 0, stdout: "", stderr: "", durationMs: 1, requiresReboot: false };
     },
   };
-  const dataDir = await mkdtemp(path.join(tmpdir(), "bundle-data-"));
+  const dataDir = await makeTrackedTmp("bundle-data-");
   return new AppCenterFacade(
     {
       serverUrl: base,
@@ -177,7 +178,7 @@ test("installBundle skips what is current, queues the rest and never blocks on a
   const calls: ExecutionRequest[] = [];
   const facade = await facadeWithRunner(installedPath, calls);
 
-  assert.equal(await facade.refreshCatalog(), 24); // seedDemo 21 + 套装测试自灌 3 个 kit 应用
+  assert.equal(await facade.refreshCatalog(), 21); // seedDemo 18 + 套装测试自灌 3 个 kit 应用
   const run = await facade.installBundle("full-kit");
   // 已装到最新版的跳过，目录里没有的记下来，剩下两个入队。
   assert.deepEqual(run.skipped, ["kit-installed"]);

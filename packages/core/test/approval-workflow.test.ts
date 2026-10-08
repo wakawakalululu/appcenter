@@ -40,9 +40,9 @@ test("回归：过期时间不晚于签发时间的自相矛盾凭证不得放�
   const client = new ApprovalWorkflow("");
   const far = "2999-01-01T00:00:00.000Z";
   // 两个时间戳都可解析、都在未来，旧实现只看 `expiresAt <= now` 于是判为「未过期」直接放行。
-  assert.equal(client.verifyGrant({ token: "t", appId: "vpn", userId: "me", issuedAt: far, expiresAt: far, signature: "" }, context).reason, "expiry-not-after-issue");
+  assert.equal(client.verifyGrant({ token: "t", appId: "vpn", userId: "me", appVersion: context.appVersion, issuedAt: far, expiresAt: far, signature: "" }, context).reason, "expiry-not-after-issue");
   assert.equal(
-    client.verifyGrant({ token: "t", appId: "vpn", userId: "me", issuedAt: far, expiresAt: "2998-01-01T00:00:00.000Z", signature: "" }, context).reason,
+    client.verifyGrant({ token: "t", appId: "vpn", userId: "me", appVersion: context.appVersion, issuedAt: far, expiresAt: "2998-01-01T00:00:00.000Z", signature: "" }, context).reason,
     "expiry-not-after-issue",
   );
 });

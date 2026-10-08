@@ -1,7 +1,7 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { access, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { runDesktop } from "../src/desktop.ts";
@@ -46,6 +46,7 @@ async function waitUntilFree(port: number, timeoutMs = 4000): Promise<boolean> {
  */
 async function silentServerEntry(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), "desktop-fake-"));
+  fakeDirs.push(dir);
   const file = path.join(dir, "silent-server.mjs");
   await writeFile(
     file,
@@ -58,6 +59,34 @@ async function silentServerEntry(): Promise<string> {
   );
   return file;
 }
+
+/**
+ * 这个助手每次调用都在临时目录里写一个假服务脚本，此前**从不回收**：实测跑一次本文件
+ * （4 条断言全绿）就多留 4 个 desktop-fake-*，本机已累积 404 个。
+ * 「全绿」和「无界消耗资源」完全可以同时成立——这种目录只被子进程读一次，
+ * 任何断言都不会因为它而变红，所以它是"成功路径沉默"那一族的又一副面孔。
+ * 回收之后还要**逐个再查一次**：`rm` 在 Windows 上可能 EPERM/EBUSY，静默失败的话这个钩子
+ * 就退化成一句"我们试过了"；查到的若不是 ENOENT 也当没回收，别把无关错误读成"已经没了"。
+ */
+const fakeDirs: string[] = [];
+
+after(async () => {
+  const created = fakeDirs.splice(0, fakeDirs.length);
+  for (const dir of created) {
+    await rm(dir, { recursive: true, force: true });
+  }
+  const survivors: string[] = [];
+  for (const dir of created) {
+    try {
+      await access(dir);
+      survivors.push(dir + "（仍然存在）");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") survivors.push(dir + "（查询失败：" + String(code) + "）");
+    }
+  }
+  if (survivors.length > 0) throw new Error("假服务的临时目录没被回收：" + survivors.join("、"));
+});
 
 async function freePort(): Promise<number> {
   const srv = net.createServer();

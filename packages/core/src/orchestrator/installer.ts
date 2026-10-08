@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { AppDetail, AppVersion } from "../catalog/types.ts";
 import type { InstalledApp } from "../inventory/inventory.ts";
 import type { DownloadProgress, DownloadResult } from "../download/downloader.ts";
@@ -10,6 +11,8 @@ import type { ApprovalWorkflow, Grant } from "../approval/workflow.ts";
 import { scanResidue, type FileSystemProbe, type ResidueReport, type ScanEnv } from "../leftover/scan.ts";
 import type { RegClient } from "../inventory/registry.ts";
 import { compare } from "../util/semver.ts";
+import { joinWithinRoot, safePathSegment } from "../util/paths.ts";
+import { resolveInstalledInstance } from "../inventory/select.ts";
 
 export type JobState =
   | "queued"
@@ -76,6 +79,13 @@ export interface OrchestratorDeps {
   installerCleanup?: () => Promise<boolean> | boolean;
   userId: string;
   grantStore: GrantStore;
+  /**
+   * 本地仓库离线取包：命中返回已镜像包的绝对路径与校验，否则 null（回退网络）。
+   * 由 facade 注入 `LocalRepo.resolve`；不传则安装永远走网络下载（旧行为不变）。
+   */
+  resolveLocalPackage?: (appId: string, version: string, downloadUrl: string) => Promise<{ file: string; sha256: string; size: number } | null>;
+  /** 本地文件复制端口（file:// 复制 + 校验），把本地仓库的包落到安装临时目录。 */
+  fileDownloader?: DownloadPort;
 }
 
 const BLOCKING: JobState[] = ["queued", "downloading", "verifying", "installing"];
@@ -198,20 +208,39 @@ export class InstallOrchestrator {
 
     if (detail.requiresApproval && !(await this.passesApprovalGate(job, detail, version))) return;
 
-    const packagePath = path.join(
-      await resolvePackageDir(this.deps.packageDir),
-      safeName(detail.name) + "-" + version.version + extensionOf(version.downloadUrl),
+    // 应用名与版本号都是目录侧给的字符串：`safeName` 的字符类替换了 `\` 却漏了 `/`，
+    // 于是 `"x/../../escapee"` 能原样进文件名，path.join 归一后把安装包写到 packageDir 之外
+    // （实测任务还报 succeeded，包落在 %TEMP% 根）。落盘分量一律过 safePathSegment + 包含性断言。
+    const packageDir = await resolvePackageDir(this.deps.packageDir);
+    const packagePath = joinWithinRoot(
+      packageDir,
+      safePathSegment(detail.name) + "-" + safePathSegment(version.version, "0") + extensionOf(version.downloadUrl),
     );
     this.transition(job, "downloading");
     let downloaded: DownloadResult;
     try {
-      downloaded = await this.deps.downloader.download({
-        id: job.id,
-        url: version.downloadUrl,
-        target: packagePath,
-        expectedSha256: version.sha256,
-        expectedSize: version.sizeBytes,
-      });
+      const local =
+        this.deps.resolveLocalPackage
+          ? await this.deps.resolveLocalPackage(detail.id, version.version, version.downloadUrl)
+          : null;
+      if (local && this.deps.fileDownloader) {
+        // 命中本地镜像：直接复制已校验的包，跳过网络下载（离线可用）。
+        downloaded = await this.deps.fileDownloader.download({
+          id: job.id,
+          url: pathToFileURL(local.file).href,
+          target: packagePath,
+          expectedSha256: local.sha256,
+          expectedSize: local.size,
+        });
+      } else {
+        downloaded = await this.deps.downloader.download({
+          id: job.id,
+          url: version.downloadUrl,
+          target: packagePath,
+          expectedSha256: version.sha256,
+          expectedSize: version.sizeBytes,
+        });
+      }
     } catch (err) {
       this.transition(job, "failed", { error: errorMessage(err) });
       return;
@@ -275,17 +304,16 @@ export class InstallOrchestrator {
   }
 
   /** 卸载后立即做残留扫描，返回报告而不是直接删除，清理计划由用户确认。 */
-  async uninstall(appIdOrName: string): Promise<InstallJob> {
+  async uninstall(appIdOrName: string, regDir?: string): Promise<InstallJob> {
     const detail = await this.deps.catalog.detail(appIdOrName);
     const installed = await this.deps.inventory.installed();
-    const target =
-      installed.find((i) => i.displayName === detail?.name) ??
-      installed.find((i) => i.displayName === appIdOrName) ??
-      installed.find((i) => i.regDir.toLowerCase() === appIdOrName.toLowerCase());
-    if (!target) throw new Error("not installed: " + appIdOrName);
+    // 目标选择收口到 resolveInstalledInstance：真机上同名不同实例确实存在
+    // （本机 141 项里 `Universal CRT Redistributable` 就有两条不同 GUID、两个版本），
+    // 旧实现按 displayName `find` 取首条 ⇒ 点下面那行卸掉的却是上面那行。
+    const target = resolveInstalledInstance(installed, { nameOrId: appIdOrName, regDir, catalogName: detail?.name });
 
     const job: InstallJob = {
-      id: "uninstall@" + target.displayName,
+      id: "uninstall@" + target.regDir.toLowerCase() + "@" + (target.displayVersion || "0"),
       appId: detail?.id ?? target.displayName,
       appName: target.displayName,
       version: target.displayVersion,
@@ -296,14 +324,21 @@ export class InstallOrchestrator {
     };
     this.jobs.set(job.id, job);
     this.transition(job, "installing");
-    const removal = await this.runUninstall(target, []);
-    if (!removal.ok) {
-      this.transition(job, "failed", { error: removal.message });
-      return job;
+    // 卸载已经建了任务，之后任何一步抛错（残留扫描踩到字段不全的注册表项就是实例）
+    // 都必须把任务落到终态：调用侧多是 `void orchestrator.uninstall(...)`，
+    // 非终态 + 未处理拒绝在本机 Node 24 上就是宿主猝死。
+    try {
+      const removal = await this.runUninstall(target, []);
+      if (!removal.ok) {
+        this.transition(job, "failed", { error: removal.message });
+        return job;
+      }
+      this.transition(job, "verifying");
+      const report = await scanResidue(target, { reg: this.deps.reg, fs: this.deps.fs, env: this.deps.env });
+      this.transition(job, "succeeded", { residue: report });
+    } catch (err) {
+      this.transition(job, "failed", { error: errorMessage(err) });
     }
-    this.transition(job, "verifying");
-    const report = await scanResidue(target, { reg: this.deps.reg, fs: this.deps.fs, env: this.deps.env });
-    this.transition(job, "succeeded", { residue: report });
     return job;
   }
 

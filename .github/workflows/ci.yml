@@ -30,12 +30,180 @@ jobs:
       # 必须用 Windows runner：注册表清单、GDI+ 图标、WinForms 托盘都是 Windows 专属。
       - name: Typecheck
         run: npm run typecheck
+      - name: 流水线脚本类型检查（scripts/*.mts 不在 tsconfig 的 include 里）
+        shell: bash
+        # reshoot.mts 曾以 mkdtemp is not defined 死在第一步，而 typecheck 全绿：它不在 include 内，
+        # 却是 README 里 npm run shots 的唯一入口。判据范围 = 整个 scripts/**/*.mts，没有手工挑文件。
+        run: npm run check:scripts
+      - name: 依赖许可证自审（宽松白名单，缺证即拒）
+        shell: bash
+        # P8 的"定期自审合规：License、依赖许可"落成的判据；判据由 packages/core/test/license-gate.test.ts 钉住。
+        run: npm run check:licenses
       - name: Emoji baseline（基线：零 emoji，UI 图标一律内联 SVG）
         run: npm run check:emoji
-      - name: Unit & integration tests
-        run: npm test
+      - name: Unit & integration tests（含用例数下限断言）
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 「npm test 绿」本身不证明测试跑过：`node --test "<glob>"` 在 glob 匹配不到任何文件时
+          # 退出码仍是 0，汇总写 tests 0（Node 24 本机实测；目录不存在也一样），
+          # 而且整作业只跑十几秒，跟真的快跑完长得一样。所以当场断言用例数下限，退化就红。
+          # 下限取在历史最小真实值（127）之下、零之上，不是把当前数字钉死。
+          npm test 2>&1 | tee "${RUNNER_TEMP:-.}/npm-test.log"
+          node scripts/check-test-count.mjs 100 "${RUNNER_TEMP:-.}/npm-test.log"
       - name: End-to-end smoke (real registry scan + CLI IPC)
         run: npm run smoke
+
+  # 跨平台覆盖：注册表/图标/托盘那套只在 Windows 跑得动，但引擎、目录、桥、
+  # 清单与路径收口这些逻辑不该只在 Windows 上被验证——之前整个矩阵被换成
+  # Windows-only 时，Linux 这条腿就断了。这里只跑平台无关的部分。
+  verify-linux:
+    name: typecheck · test（Linux 平台无关面）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # fetch-depth: 2 —— 下面那条覆盖判据要拿父提交的树当基线。
+      # 默认的 depth 1 会让父提交不可解析；那种情况下必须红（判据没执行），不能被当成绿。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: 覆盖只许升不许降（与父提交比较测试文件数）
+        shell: bash
+        # 这条管的是「用例数下限」管不到的那一类：下限断言拦的是 glob 退化到 0 条，
+        # 而少提交几十个测试文件时总数仍然远高于下限、整条链一路绿灯（本机实测：漏 32 个文件＝少 139 条，362 掉到 223 仍放行）。
+        # 跨提交比较是 CI 侧唯一能看见这件事的角度——本地那条 check:delivery 在 CI 里必然绿（工作树恒等于提交内容）。
+        run: npm run check:coverage
+      - name: Typecheck
+        run: npm run typecheck
+      - name: 流水线脚本类型检查（Linux 侧同样跑）
+        shell: bash
+        run: npm run check:scripts
+      - name: Emoji baseline
+        run: npm run check:emoji
+      - name: Unit & integration tests（含用例数下限断言）
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 「npm test 绿」本身不证明测试跑过：`node --test "<glob>"` 在 glob 匹配不到任何文件时
+          # 退出码仍是 0，汇总写 tests 0（Node 24 本机实测；目录不存在也一样），
+          # 而且整作业只跑十几秒，跟真的快跑完长得一样。所以当场断言用例数下限，退化就红。
+          # 下限取在历史最小真实值（127）之下、零之上，不是把当前数字钉死。
+          npm test 2>&1 | tee "${RUNNER_TEMP:-.}/npm-test.log"
+          node scripts/check-test-count.mjs 100 "${RUNNER_TEMP:-.}/npm-test.log"
+      # smoke 不在 Linux 跑：它要 reg.exe 扫真机注册表，属 Windows 专属。
+
+  # 公开面门禁：敏感标识与「只该留在本地的目录」一旦被提交就当场红，
+  # 而不是等推上去之后靠人肉看图。截图里的像素 grep 抓不到，那部分仍需目视。
+  compliance:
+    name: 公开边界与词表门禁
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 —— 提交信息门禁要遍历本次推送进来的整段区间；默认 depth 1 会让区间解析不了，
+      # 而那条判据在区间不可解析时是红（不是悄悄跳过），所以必须给够历史。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 提交信息也是公开面（文件级 grep 结构上查不到它）
+        shell: bash
+        # 远程 16 条公开提交信息逐条过同一张词表，实测命中 1 条；那时文件级门禁全绿。
+        # 已发布的历史要不要改写是另一件需要单独决策的事；这条管的是别再往公开历史上加新的。
+        run: |
+          set -euo pipefail
+          zero="0000000000000000000000000000000000000000"
+          base="${{ github.event.before }}"
+          if [ -z "$base" ] || [ "$base" = "$zero" ]; then base="${{ github.event.pull_request.base.sha }}"; fi
+          if [ -z "$base" ] || [ "$base" = "$zero" ]; then base="HEAD~1"; fi
+          npm run check:commits -- "$base..${{ github.sha }}"
+      - name: 已跟踪内容不得出现禁用标识
+        shell: bash
+        # 词表一律用字符类写法（pc[a]s 这种）：正则照样命中真实内容，
+        # 但本文件自身不含这些字面词——否则门禁会匹配到自己、第一次跑就红。
+        # 步骤名与注释同理，不能写出这些词。
+        #
+        # 另一个只有本机才会踩的坑：这条命令的正确性依赖 grep 的多字节支持。
+        # CI 上的 GNU grep（UTF-8 locale）里「汉字 + 一个字符类」是**一个字符**的类；
+        # 而 Windows 下 Git Bash 自带的那版 grep 按**字节**处理字符类，同一个类会退化成
+        # 「该汉字 3 个 UTF-8 字节里任意一个」，于是常见中文双字词会被判成命中——
+        # 实测同一条命令在本机报 13~21 条，改用 Node 的 RegExp（字符类语义正确）复核
+        # 同一批 HEAD 文件是 0 条。所以：本机照抄这条命令看到红，先判引擎再判内容，
+        # 不要照着假红去改文案，更不要为此关掉门禁。
+        run: |
+          set -euo pipefail
+          # 中文词按「字面量」匹配，不用字符类。原因实测过：某些 git 构建里 `git grep -E` 的正则引擎
+          # 会把字符类按字节处理，于是「复」+「某字的第一个字节」就成立 —— 本机跑整条词表命中 26 行，
+          # 全是「复制/不可逆/重复」这类普通词（同一模式交给 GNU grep 是正确的，说明不能信引擎一致性）。
+          # 字面量是逐字节相等比较，任何引擎都不会串味。
+          # 代价：本文件里的这一行本身含这些词，所以中文词这一路跳过本文件（ASCII 那一路仍全量扫，
+          # 且用的是拆字符类写法、不会命中自己）。⇒ 本文件不得写入中文禁用词这件事由人工评审兜。
+          ASCII='pc[a]s|clean[- ]?room|reference[ ]product|decomp[i]l|reverse[- ]?engineer|Venus[Gg]roup'
+          CJK='逆向|反编译|复刻|参考件'
+          rc=0
+          if git grep -nEi "$ASCII" HEAD; then rc=1; fi
+          if git grep -nE "$CJK" HEAD -- ':(exclude).github/workflows/ci.yml'; then rc=1; fi
+          if [ "$rc" -ne 0 ]; then
+            echo '::error::公开内容里出现禁用标识，见上方命中行'
+            exit 1
+          fi
+      - name: 已跟踪内容不得出现具体用户名的家目录路径
+        shell: bash
+        # 与上一条的分工：词表治「项目身份」，这条治「操作者的身份」。用户名写进本文件本身就是泄露，
+        # 所以判据是通用形状，不含任何真实账号：反斜杠或正斜杠形式的「用户目录段 + 紧跟一段具体名字」，
+        # 以及行首/非字母数字之后的 home 段。安全写法（环境变量占位、尖括号占位、os.homedir()、
+        # 仓库内的相对 home 路径）都不长这样 —— 下面用阴性对照钉住这一点。
+        # 阳性对照同样必备：规则一旦坏掉（比如转义被改错），这条门禁会从「红得有道理」退化成空断言，
+        # 而空断言永远绿，比没有门禁更危险。词表拆字写法是为了不让本文件被自己命中。
+        run: |
+          set -euo pipefail
+          PAT='U[s]ers[\\/][A-Za-z0-9._-]+|(^|[^A-Za-z0-9])/[Hh]ome/[A-Za-z0-9._-]+'
+          POS="C:\\U""sers\\mo""ck\\AppData"
+          for safe in '%USERPROFILE%\\AppData' 'C:\\Users\\<name>\\AppData' 'os.homedir()' 'packages/app/web/home/index.html' 'src/home/page.ts'; do
+            if printf '%s' "$safe" | grep -Eqi "$PAT"; then
+              echo "::error::个人路径规则过宽，安全写法会被误伤：$safe"
+              exit 1
+            fi
+          done
+          if ! printf '%s' "$POS" | grep -Eqi "$PAT"; then
+            echo '::error::个人路径规则失效：合成样例没被命中，这条门禁等于空断言'
+            exit 1
+          fi
+          if git grep -nEi "$PAT" HEAD; then
+            echo '::error::公开内容里出现具体用户名的家目录路径，改成占位写法或本机无关的相对路径（见上方命中行）'
+            exit 1
+          fi
+      - name: 文档里的本地引用必须能在发布出来的树里落地
+        shell: bash
+        # 治的是"本机预览正常、推上去是死链"：链接指向被 gitignore 的文件或从未存在的文件。
+        # 判据由 packages/core/test/link-gate.test.ts 钉住（绿/死链红/ignore 红/路由例外不误伤）。
+        run: node scripts/check-links.mjs
+      - name: 本地专属目录不得入库
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 去敏表点名的三类"只留在本地"：分析笔记目录（re/、recon/、behavior/）、原始二进制安装包、本机专属目录与笔记。
+          # 现在这些都不在树里，但"现在没有"不是判据——没有这一条，任何一次顺手 git add -A 都会把它们推上公开面。
+          hits=$(git ls-files | grep -E '^(_internal/|LOCAL-NOTES\.md|compliance-checklist\.md|local-repo/|smoke-packages/|\.shots/|re/|recon/|behavior/|.*\.(exe|msi|msp|dll|cab|msm|zip|7z|rar)$)' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::以下路径只应留在本地：$hits"
+            exit 1
+          fi
+          # 黑名单是打地鼠：新起一个 recon/、notes/、analysis/ 就绕过去了。
+          # 需求文档 P7 本来就要求"白名单推送"，所以这里把顶层条目收敛成显式清单——
+          # 多一个新顶层目录必须先改这条规则，评审时看得见。
+          tracked_top=$(git ls-files | cut -d/ -f1 | LC_ALL=C sort -u)
+          # tsconfig.scripts.json 是 npm run check:scripts 唯一的配置入口（范围=整个 scripts/**/*.mts），
+          # 与主 tsconfig.json 一样属顶层配置文件；新增顶层条目必须先登记理由，这条评审可见性是故意的。
+          allowed_top=$(printf '%s\n' .github .gitignore CHANGELOG.md CONTRIBUTING.md LICENSE LOCAL-REPO.md README.md SECURITY.md docs package-lock.json package.json packages scripts spec tsconfig.json tsconfig.scripts.json wiki | LC_ALL=C sort -u)
+          stray=$(comm -23 <(printf '%s\n' "$tracked_top") <(printf '%s\n' "$allowed_top"))
+          if [ -n "$stray" ]; then
+            echo "::error::出现未在推送白名单里的顶层条目：$(echo "$stray" | tr '\n' ' ')（要新增请先在本文件里登记理由）"
+            exit 1
+          fi
 
   demo:
     name: demo 启动 · UI 截图产物
@@ -49,16 +217,80 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # 目录 API(7991) + UI(8080) 同进程起，后台运行给足预热。
+      # 端口交给我们自己起的 ui-demo 挑（0 = 临时端口），再只认它日志里 announce 的实际端口。
+      # 旧写法写死 7991/8080，判据是「这个端口返不返 200」：开发机上常驻实例已经占着这两个端口，
+      # 实测两条问句直接为真 ⇒「Start demo」绿着通过、截图截的是常驻那一套的数据（真机已装清单也在里面）。
+      # 这和 smoke/ui-shot 修过的同一类缺陷一致：就绪判据必须含身份信息，否则产物错而信号绿。
       - name: Start demo
         shell: bash
         run: |
-          node --experimental-transform-types scripts/ui-demo.mts &
-          sleep 12
-      # 无头 Chrome/Edge 驱动真实页面：切 fresh 皮肤、逐视图截图，页面错误会让脚本退出非零。
+          set -euo pipefail
+          # UI_DEMO_FAKE_INVENTORY=1：已装视图不扫 runner 的真实注册表。
+          # 截图产物是公开可下载的，且 runner 装了哪些软件会随镜像版本变 —— 既可能带出机器信息，也让配图不可复现。
+          # 日志与 pid 落在临时目录里：这套步骤被人复制到开发机上跑时，不该往仓库根丢文件。
+          DEMO_TMP="${RUNNER_TEMP:-$PWD}"
+          UI_DEMO_FAKE_INVENTORY=1 CATALOG_PORT=0 UI_PORT=0 node --experimental-transform-types scripts/ui-demo.mts > "$DEMO_TMP/ui-demo.log" 2>&1 &
+          DEMO_PID=$!
+          echo "$DEMO_PID" > "$DEMO_TMP/ui-demo.pid"
+          catalog=""
+          ui=""
+          for i in $(seq 1 60); do
+            catalog=$(grep -oE 'catalog api on http://127\.0\.0\.1:[0-9]+' "$DEMO_TMP/ui-demo.log" | head -1 | grep -oE '[0-9]+$' || true)
+            ui=$(grep -oE 'ui on http://127\.0\.0\.1:[0-9]+' "$DEMO_TMP/ui-demo.log" | head -1 | grep -oE '[0-9]+$' || true)
+            if [ -n "$catalog" ] && [ -n "$ui" ]; then break; fi
+            if ! kill -0 "$DEMO_PID" 2>/dev/null; then
+              echo "::error::ui-demo 起不来（提前退出）"
+              cat "$DEMO_TMP/ui-demo.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ -z "$catalog" ] || [ -z "$ui" ]; then
+            echo "::error::ui-demo 未在 60s 内 announce 自己的端口"
+            cat "$DEMO_TMP/ui-demo.log"
+            exit 1
+          fi
+          # 身份信息来自「我们重定向的自己子进程的日志」，端口是 listen(0) 拿到的临时端口，别的实例不可能写进这份日志。
+          # 额外做一次跨持有者核对：Git Bash 的 $! 是 cygwin PID，和 netstat 报的 Windows PID 不是一回事，
+          # 所以不能直接比数字；用端口反查持有者，再验它的命令行确实是本次要起的这个脚本。
+          owner=$(powershell.exe -NoProfile -Command "(Get-NetTCPConnection -LocalPort ${ui} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess" | tr -d '\r')
+          ownerCmd=$(powershell.exe -NoProfile -Command "(Get-CimInstance Win32_Process -Filter \"ProcessId=${owner}\").CommandLine" | tr -d '\r')
+          case "$ownerCmd" in
+            *ui-demo.mts*) ;;
+            *) echo "::error::端口 $ui 的持有者命令行为「$ownerCmd」，不是 ui-demo.mts"; exit 1 ;;
+          esac
+          curl -sf "http://127.0.0.1:${catalog}/api/apps" > /dev/null
+          curl -sf "http://127.0.0.1:${ui}/" > /dev/null
+          echo "DEMO_UI_URL=http://127.0.0.1:${ui}" >> "$GITHUB_ENV"
+          echo "DEMO_UI_PORT=${ui}" >> "$GITHUB_ENV"
+          echo "demo ready: catalog=${catalog} ui=${ui} pid=${DEMO_PID}"
+      # 无头 Chrome/Edge 驱动真实页面：切 fresh 皮肤、逐视图截图；页面没渲染或报错会以非零码退出。
       - name: Capture UI screenshots
         shell: bash
-        run: node --experimental-transform-types scripts/ui-shot.mts http://127.0.0.1:8080/ .shots "skin:fresh,home,categories,installed,upgrade,search" 1237x762
+        # ?mask=1：设置页会显示真实的下载目录与配置文件路径，在 runner 上就是运行账号的家目录。
+        # 截图产物是公开可下载的，所以默认走脱敏显示（只改显示，不改数据）。
+        run: node --experimental-transform-types scripts/ui-shot.mts "$DEMO_UI_URL/?mask=1" .shots "skin:fresh,home,categories,installed,upgrade,search" 1237x762
+      # 收尾把子进程带走：CI 上 runner 会清，但这套步骤在开发机上是被人直接复制去重截 README 截图的。
+      - name: Stop demo
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          DEMO_TMP="${RUNNER_TEMP:-$PWD}"
+          port="${DEMO_UI_PORT:-}"
+          if [ -f "$DEMO_TMP/ui-demo.pid" ]; then kill "$(cat "$DEMO_TMP/ui-demo.pid")" 2>/dev/null || true; fi
+          sleep 2
+          if [ -n "$port" ]; then
+            owner=$(powershell.exe -NoProfile -Command "(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess" | tr -d '\r')
+            if [ -n "$owner" ]; then
+              # 端口还被人占着：只按「端口持有者」这一条线索收尾，绝不按进程名批量杀（同名命令行会误伤别人的实例）。
+              cmd=$(powershell.exe -NoProfile -Command "(Get-CimInstance Win32_Process -Filter \"ProcessId=${owner}\").CommandLine" | tr -d '\r')
+              case "$cmd" in
+                *ui-demo.mts*) taskkill //PID "$owner" //T //F >/dev/null 2>&1 || powershell.exe -NoProfile -Command "Stop-Process -Id $owner -Force" ;;
+                *) echo "::warning::端口 $port 仍被非 ui-demo 进程 $owner 占用，不动它" ;;
+              esac
+            fi
+          fi
       - name: Upload screenshots
         uses: actions/upload-artifact@v4
         with:

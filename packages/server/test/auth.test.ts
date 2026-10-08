@@ -1,12 +1,14 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
+
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { CatalogDb, createApi, seedDemo } from "../src/server.ts";
+import { makeTrackedTmp } from "../../core/test/util/tmp-dirs.ts";
 
-const packageRoot = await mkdtemp(path.join(tmpdir(), "auth-pkgs-"));
+const packageRoot = await makeTrackedTmp("auth-pkgs-");
 const db = CatalogDb.memory("auth-secret");
 const adminToken = "static-admin";
 const server = createApi({ db, packageRoot, adminToken });
@@ -115,7 +117,7 @@ test("catalog honors department scoping", async () => {
     .prepare("INSERT INTO app_department_access (app_id, department_id) VALUES (?, ?)")
     .run("wps-office", "dept-eng");
   const all = await api<{ id: string }[]>("/api/apps");
-  assert.equal(all.body.length, 21, "默认不过滤（seedDemo 含 11 个补足分类密度的 extraApps）");
+  assert.equal(all.body.length, 18, "默认不过滤（seedDemo 已去除移动云系 3 个应用）");
   const scoped = await api<{ id: string }[]>("/api/apps?department=dept-eng");
   assert.equal(scoped.body.length, 1);
   assert.equal(scoped.body[0]?.id, "wps-office");

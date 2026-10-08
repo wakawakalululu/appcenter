@@ -2,7 +2,7 @@ import { RegExeClient, CONTEXTMENU_ROOTS, scanInstalledApps, scanResidue, defaul
 import fs from "node:fs/promises";
 import path from "node:path";
 
-const line = (s: string): void => process.stdout.write(s + "\n");
+const line = (s: string): void => { process.stdout.write(s + "\n"); };
 const norm = (p: string): string => p.toLowerCase().replace(/\\+$/, "");
 
 /** 真实注册表只读探针：按调用类别累计次数与耗时，定位 contextmenu 段的开销来源。 */

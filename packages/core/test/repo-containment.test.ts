@@ -1,10 +1,11 @@
 import { test } from "node:test";
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { LocalRepo, localFileDownloader, type AppDetail } from "@appcenter/core";
+import { makeTrackedTmp } from "./util/tmp-dirs.ts";
 
 const BS = String.fromCharCode(92);
 const sha = (buf: Buffer) => createHash("sha256").update(buf).digest("hex");
@@ -50,7 +51,7 @@ function recorder(written: string[]) {
 }
 
 test("回归：目录给的 version/appId 不能让镜像写到仓库根之外", async () => {
-  const sandbox = await mkdtemp(path.join(tmpdir(), "repo-contain-"));
+  const sandbox = await makeTrackedTmp("repo-contain-");
   const root = path.join(sandbox, "mirror");
   const written: string[] = [];
   const repo = new LocalRepo({ downloader: recorder(written) as never, root });
@@ -67,7 +68,7 @@ test("回归：目录给的 version/appId 不能让镜像写到仓库根之外",
 });
 
 test("回归：status() 不去 stat 仓库根之外的路径", async () => {
-  const sandbox = await mkdtemp(path.join(tmpdir(), "repo-status-"));
+  const sandbox = await makeTrackedTmp("repo-status-");
   const root = path.join(sandbox, "mirror");
   await mkdir(root, { recursive: true });
   // 手工写一份被篡改的清单：条目指向仓库根**外面**一个真实存在的文件。
@@ -87,7 +88,7 @@ test("回归：status() 不去 stat 仓库根之外的路径", async () => {
 });
 
 test("回归：localFileDownloader 不再把任意本地路径当安装包拷进镜像", async () => {
-  const sandbox = await mkdtemp(path.join(tmpdir(), "localdl-"));
+  const sandbox = await makeTrackedTmp("localdl-");
   const secret = path.join(sandbox, "private.txt");
   const body = Buffer.from("PRIVATE LOCAL CONTENT");
   await writeFile(secret, body);

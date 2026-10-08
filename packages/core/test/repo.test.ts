@@ -179,3 +179,46 @@ test("verify=sha256 refuses a cached file whose bytes no longer match", async ()
   assert.equal(landed.toString(), good.toString(), "重新下载应覆盖被篡改的文件");
   await rm(root, { recursive: true, force: true });
 });
+
+test("resolve returns the mirrored package when present and intact", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "repo-"));
+  const { apps, files } = fixture([{ id: "ide", name: "代码编辑器", versions: ["3.4.2"] }]);
+  await new LocalRepo({ downloader: new FakeDownloader(files), root }).sync({ apps, categories });
+
+  const hit = await new LocalRepo({ downloader: new FakeDownloader(files), root }).resolve("ide", "3.4.2", "/dl/ide-3.4.2.exe");
+  assert.ok(hit, "已镜像且完整的包应命中");
+  assert.equal(hit!.sha256, sha(files.get("/dl/ide-3.4.2.exe")!));
+  assert.equal(hit!.size, files.get("/dl/ide-3.4.2.exe")!.length);
+  assert.ok(hit!.file.endsWith(path.join("ide", "3.4.2.exe")));
+  await rm(root, { recursive: true, force: true });
+});
+
+test("resolve misses on unknown version, unknown app or missing file", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "repo-"));
+  const { apps, files } = fixture([{ id: "ide", name: "代码编辑器", versions: ["3.4.2"] }]);
+  await new LocalRepo({ downloader: new FakeDownloader(files), root }).sync({ apps, categories });
+  const repo = new LocalRepo({ downloader: new FakeDownloader(files), root });
+
+  assert.equal(await repo.resolve("ide", "9.9.9", "/dl/ide-9.9.9.exe"), null, "未知版本不命中");
+  assert.equal(await repo.resolve("other", "3.4.2", "/dl/other-3.4.2.exe"), null, "未知应用不命中");
+  await rm(path.join(root, "ide", "3.4.2.exe"));
+  assert.equal(await repo.resolve("ide", "3.4.2", "/dl/ide-3.4.2.exe"), null, "文件被删后不命中");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("resolve with verify=sha256 rejects a tampered cached file", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "repo-"));
+  const { apps, files } = fixture([{ id: "ide", name: "代码编辑器", versions: ["3.4.2"] }]);
+  const good = files.get("/dl/ide-3.4.2.exe")!;
+  await new LocalRepo({ downloader: new FakeDownloader(files), root }).sync({ apps, categories });
+  const tampered = Buffer.from(good.toString().replace(/a/g, "b"));
+  assert.equal(tampered.length, good.length);
+  await writeFile(path.join(root, "ide", "3.4.2.exe"), tampered);
+
+  const sizeRepo = new LocalRepo({ downloader: new FakeDownloader(files), root, verify: "size" });
+  assert.ok(await sizeRepo.resolve("ide", "3.4.2", "/dl/ide-3.4.2.exe"), "size 档位只看大小，判为命中");
+
+  const shaRepo = new LocalRepo({ downloader: new FakeDownloader(files), root, verify: "sha256" });
+  assert.equal(await shaRepo.resolve("ide", "3.4.2", "/dl/ide-3.4.2.exe"), null, "sha256 档位识破篡改");
+  await rm(root, { recursive: true, force: true });
+});

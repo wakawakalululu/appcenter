@@ -1,14 +1,15 @@
 import { test } from "node:test";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { CatalogDb, createApi, seedDemo } from "@appcenter/server";
 import { createBridge } from "../src/bridge.ts";
 import { readStatic, resolveStatic } from "../src/dispatch.ts";
 import { AppCenterFacade, UNINSTALL_ROOTS, regKey, type WindowHost } from "@appcenter/core";
+import { makeTrackedTmp } from "../../core/test/util/tmp-dirs.ts";
 
 class NullHost implements WindowHost {
   async create(): Promise<string> { return "win-1"; }
@@ -29,17 +30,19 @@ test("static resolution refuses to escape the web root", () => {
 test("bridge serves the UI and routes RPC to the facade", async () => {
   const db = CatalogDb.memory("bridge-secret");
   seedDemo(db);
-  const catalogApi = createApi({ db, packageRoot: await mkdtemp(path.join(tmpdir(), "bridge-pkgs-")), adminToken: "admin" });
+  const catalogApi = createApi({ db, packageRoot: await makeTrackedTmp("bridge-pkgs-"), adminToken: "admin" });
   const catalogPort = await new Promise<number>((resolve) => catalogApi.listen(0, "127.0.0.1", () => resolve((catalogApi.address() as AddressInfo).port)));
 
-  const dataDir = await mkdtemp(path.join(tmpdir(), "bridge-data-"));
+  const dataDir = await makeTrackedTmp("bridge-data-");
   const facade = new AppCenterFacade(
     {
       serverUrl: "http://127.0.0.1:" + String(catalogPort),
       userId: "me",
       dataDir,
       appVersion: "1.0.0",
-      registryKeys: [regKey((UNINSTALL_ROOTS[0]?.path ?? "") + "\Wps", { DisplayName: "WPS Office", DisplayVersion: "12.0.0", Publisher: "金山办公" })],
+      // 分隔符要显式写：`"\Wps"` 里的 `\W` 不是转义，JS 会把反斜杠吃掉变成 `UninstallWps`，
+      // 于是这条键根本不在卸载根下——旧桩用裸 startsWith 匹配时才「碰巧」被当成已装应用。
+      registryKeys: [regKey((UNINSTALL_ROOTS[0]?.path ?? "") + "\\Wps", { DisplayName: "WPS Office", DisplayVersion: "12.0.0", Publisher: "金山办公" })],
     },
     new NullHost(),
   );
@@ -111,10 +114,10 @@ test("bridge serves the UI and routes RPC to the facade", async () => {
 test("tray menu actions route back through the engine and register windows", async () => {
   const db = CatalogDb.memory("tray-secret");
   seedDemo(db);
-  const catalogApi = createApi({ db, packageRoot: await mkdtemp(path.join(tmpdir(), "tray-pkgs-")), adminToken: "admin" });
+  const catalogApi = createApi({ db, packageRoot: await makeTrackedTmp("tray-pkgs-"), adminToken: "admin" });
   const catalogPort = await new Promise<number>((resolve) => catalogApi.listen(0, "127.0.0.1", () => resolve((catalogApi.address() as AddressInfo).port)));
   const facade = new AppCenterFacade(
-    { serverUrl: "http://127.0.0.1:" + String(catalogPort), userId: "me", dataDir: await mkdtemp(path.join(tmpdir(), "tray-data-")), appVersion: "1.0.0" },
+    { serverUrl: "http://127.0.0.1:" + String(catalogPort), userId: "me", dataDir: await makeTrackedTmp("tray-data-"), appVersion: "1.0.0" },
     new NullHost(),
   );
   const bridge = createBridge({ facade, webRoot });

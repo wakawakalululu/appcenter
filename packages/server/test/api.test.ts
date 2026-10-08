@@ -1,11 +1,12 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { CatalogDb, createApi, seedDemo } from "../src/server.ts";
+import { makeTrackedTmp } from "../../core/test/util/tmp-dirs.ts";
 import {
   AppCenterFacade,
   UNINSTALL_ROOTS,
@@ -28,8 +29,8 @@ class FakeHost implements WindowHost {
   async focus(): Promise<void> {}
 }
 
-const packageRoot = await mkdtemp(path.join(tmpdir(), "api-pkgs-"));
-const dataDir = await mkdtemp(path.join(tmpdir(), "api-data-"));
+const packageRoot = await makeTrackedTmp("api-pkgs-");
+const dataDir = await makeTrackedTmp("api-data-");
 const db = CatalogDb.memory("test-secret");
 const adminToken = "admin-token";
 const server = createApi({ db, packageRoot, adminToken });
@@ -63,9 +64,9 @@ async function waitFor(predicate: () => boolean, limitMs = 3000): Promise<void> 
 test("catalog lists apps, categories and app detail", async () => {
   const apps = await api<{ id: string }[]>("/api/apps");
   assert.equal(apps.status, 200);
-  assert.equal(apps.body.length, 21, "seedDemo 含 11 个补足分类密度的 extraApps");
+  assert.equal(apps.body.length, 18, "seedDemo 已去除移动云系 3 个应用");
   const categories = await api<{ id: string }[]>("/api/categories");
-  assert.equal(categories.body.length, 10);
+  assert.equal(categories.body.length, 9, "已删除 mobile 移动专区分类");
   const detail = await api<{ versions: unknown[]; installMode?: string }>("/api/apps/enterprise-im");
   assert.equal(detail.body.versions.length, 1);
   assert.equal(detail.body.installMode, "manual", "目录里声明的手动安装模式要透传");
@@ -235,7 +236,7 @@ test("facade drives search, upgrade planning and an approval-gated install end t
     new FakeHost(),
   );
 
-  assert.equal(await facade.refreshCatalog(), 22); // seedDemo 21 + 本测试自灌的 local-demo
+  assert.equal(await facade.refreshCatalog(), 19); // seedDemo 18 + 本测试自灌的 local-demo
   const hits = await facade.search({ text: "bendi" });
   assert.ok(hits.length > 0);
 

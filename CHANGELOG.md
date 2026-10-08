@@ -24,11 +24,14 @@
 - 心跳时序留存：每次上报追加一条计数快照，按机器保留最近 100 条并自动剪枝。
 - 离线判定：`GET /api/admin/fleet` 支持 `?staleAfterHours=`（默认 24h），逐机返回 `stale` / `lastSeenAgeMs`，`totals` 增加 `stale` 计数。
 - 新增 `GET /api/admin/fleet/:machineId`：单机详情（最近快照 + 时序历史，按上报时间倒序）。
+- 新增审计查询与导出（`packages/server/src/audit.ts`）：`GET /api/admin/audit`（按时间窗 / action 子串 / actor 过滤、分页）与 `GET /api/admin/audit/export?format=csv|json`（附件下载，CSV 严格转义）。`extras.ts` 的 banners / bundles 管理写入现已补 `recordAudit`，消除「关键动作不漏记」缺口。
+- 审批工作台后端闭环：`GET /api/approvals` 支持管理员不带 `applicant` 时返回全量工单（投影补全 `appVersion` / `applicant` / `decidedBy` / `expiresAt`）；新增 `POST /api/approvals/:id/revoke`（仅管理员，把 pending/approved/granted 置为 revoked 使已发凭证失效，并写入审计）；`remote.ts` 加 `adminApprovals` / `decideApproval` / `revokeApproval`，`facade.ts` 加 `adminApprovalList` / `decideApproval` / `revokeApproval`，并修正 `approvalRequests()` 改以服务端为权威源（管理员已批准/驳回状态回流，不再长期停在 pending）。
 
 ### 引擎（packages/core）
 
 - 本地应用包仓库（`localrepo/repo.ts`）：`LocalRepo.sync` 把目录里所有应用的安装包（默认最新版，`allVersions` 可选全部历史）经断点续传下载、sha256+体积双校验后持久化到 `<root>/<appId>/<version><ext>`，并生成自描述 `manifest.json`（逐包索引 + 全量目录快照）；缓存命中跳过下载、失败逐包记录下一轮自动重试（`attempts` 累计）、`status` 按磁盘事实重算 saved/failed/pending、清单原子写。`verify:"sha256"` 档位可识破同长度篡改的缓存文件。相对 `downloadUrl` 由 facade 以 `serverUrl` 补全。
 - `facade` 新增 `syncLocalRepo` / `localRepoStatus`；`installMode: silent | manual` 贯通 types → apps 表（旧库自动补列）→ 视图 → RPC：手动安装的执行计划剥掉静默参数（MSI 只留 `/i`+包路径、NSIS/Inno 弹向导，卸载语义不变）。
+- 离线安装接通：facade 持有 `LocalRepo` 单例，安装编排器在下载前先 `LocalRepo.resolve(appId, version, downloadUrl)` 查本地镜像，命中经 `localFileDownloader`（`file://` 复制 + size/sha256 校验）复用已落盘包、跳过网络下载，未命中回退 HTTP 下载器；`LocalRepo` 新增 `resolve` 与纯函数 `relativePathOf`（sync 与 resolve 共用路径规则）。
 
 ### 服务端（packages/server）
 
@@ -45,6 +48,7 @@
 - 桌面应用窗口（`packages/app/src/desktop.ts`，`npm run desktop`）：一条命令拉起目录服务 + 引擎 + 桥并打开 Edge/Chrome `--app` **独立桌面窗口**——无标签页/地址栏、任务栏独立图标、品牌 favicon 作窗口图标，窗口初始几何取工作区的 60.4% × 66.1%（最小 900×600，居中），独立 user-data-dir 不复用日常浏览器会话；`?shell=app` 时 UI 隐藏自绘窗口控制按钮交给 OS 标题条。作为「网页 → 桌面端」迁移的第 2 层，Tauri（第 3 层）待 Rust 工具链就绪后换壳即可，UI 代码三层同源。
 - bridge 新增 `/favicon.svg` 品牌图标（云 + 购物袋，自绘原创），`index.html` 挂 `<link rel="icon">`。
 - dispatch 新增 `heartbeat.report`、`fleet.summary`（支持 `staleAfterHours`）与 `fleet.detail`，Web 桥与 CLI 同源可用。
+- 审批工作台（Web UI）：新增「审批工作台」视图与 `approval.listAll` / `approval.decide` / `approval.revoke` RPC，pending 工单可受理/驳回、已签发可吊销；`approval.list` 现以服务端为权威源回流状态。管理员鉴权由后端 fail-closed 拦截保证。
 - dispatch 新增 `repo.sync` / `repo.status`；CLI 新增 `repo-sync [--all-versions] [--dir=PATH]` 与 `repo-status`；设置页新增「本地应用包仓库」卡片（同步最新版/全部版本、状态盘点、逐包路径清单）。
 - 首屏骨架屏：banner 与分类卡在数据到达前给 shimmer 占位（`prefers-reduced-motion` 下停用动画）。
 - 生成式演示图标路由 `/icons/gen/<seed>.svg`（哈希色相 + 首字母瓷贴）；行内按钮三态语义（打开/一键安装▾/手动安装）、行名称区可点开详情、必备应用条无标签图标墙、细滚动条。
@@ -54,6 +58,7 @@
 
 - CI 重写（`.github/workflows/ci.yml`）：`windows-latest` 跑全链（typecheck + 全部测试 + 真机冒烟，注册表/托盘能力在 ubuntu 上跑不全）、`npm ci` + 依赖缓存、同分支并发取消、job 级 timeout；新增 demo job 起演示环境并用无头浏览器逐视图截图，截图随 artifact 产出。`package.json` 新增 `ci` / `demo` / `shots` 单一入口。
 - 文档：README 补 Mermaid 架构/安装状态机/本地仓库/流水线图与截图墙、设计对标说明；新增 [LOCAL-REPO.md](LOCAL-REPO.md)。
+- 文档：新增成果固化与推进三件套——[docs/project-status.md](docs/project-status.md)（成果固化快照）、[docs/roadmap.md](docs/roadmap.md)（推进路线）、[docs/consolidation-and-roadmap.md](docs/consolidation-and-roadmap.md)（成果概述 / 固化内容清单 / 阶段-里程碑-责任分工-时间安排 / 风险登记册 / 跟踪复盘机制）。全部通过 emoji 基线与文档引用落地门禁。
 - 137 项自动化测试全部通过（在资产摘要范围边界、离线判定阈值、机群汇总往返、时序留存与剪枝、鉴权闸门之外，新增本地仓库的落盘与清单结构、缓存命中不发请求、失败记录与重试累计、status 按磁盘重算、sha256 识破篡改，以及真 HTTP 端到端镜像与全版本落盘用例），类型检查干净。
 
 ## 0.1.0 - 2026-10-06

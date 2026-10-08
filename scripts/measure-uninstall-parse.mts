@@ -1,6 +1,6 @@
 import { RegExeClient, scanInstalledApps, type InstalledApp } from "../packages/core/src/index.ts";
 
-const line = (s: string): void => process.stdout.write(s + "\n");
+const line = (s: string): void => { process.stdout.write(s + "\n"); };
 
 /** 现状 parseUninstallCommand 的取 program 方式：去所有引号后按空白切，取第一段。 */
 function currentProgram(raw: string): string {

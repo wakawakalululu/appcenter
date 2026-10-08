@@ -197,7 +197,17 @@ function registryAction(item: ResidueItem): CleanupAction {
 export function buildCleanupPlan(report: ResidueReport, policy: CleanupPolicy): PlanResult {
   const actions: CleanupAction[] = [];
   const skipped: PlanResult["skipped"] = [];
+  // 扫描不完整的报告一律不出计划。理由不是「找到的项不可信」，而是**「已经卸载」这个前提不再可证**：
+  // 残留清理默认这台机器上该项属于卸载后的遗留，而判断依据（卸载项是否还在、启动项/服务指向谁）
+  // 正是那些没读到的注册表根。少扫一段的后果是「本该出现的残留没出现在勾选列表里」，
+  // 用户却是在「这就是全部残留」的印象下确认的。重扫一次只花一两秒，删错了不能。
+  const gaps = report.gaps ?? [];
+  const incompleteReason = gaps.length > 0 ? "本次扫描不完整（" + gaps.map((g) => g.kind + "←" + g.source).join("、") + "），拒绝据此删除" : "";
   for (const item of report.items) {
+    if (incompleteReason) {
+      skipped.push({ item, reason: incompleteReason });
+      continue;
+    }
     if (!policy.includeRisks.includes(item.risk)) {
       skipped.push({ item, reason: "risk " + item.risk + " is not selected" });
       continue;

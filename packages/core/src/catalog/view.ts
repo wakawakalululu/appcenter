@@ -25,7 +25,9 @@ export interface CatalogEntry {
 }
 
 function normalizeName(value: string): string {
-  return value.normalize("NFKC").toLowerCase().replace(/[\s\-_·．.]+/g, "");
+  // 各类连字符/破折号（含 U+2010–U+2015、全角－）与 ASCII 分隔符同等对待：
+  // Windows 显示名里 `Redistributable – x64` 这类写法很常见，只剥 ASCII `-` 会让尾巴判定失败。
+  return value.normalize("NFKC").toLowerCase().replace(/[\s\-_·．.\u2010-\u2015－]+/g, "");
 }
 
 /**
@@ -40,26 +42,54 @@ function stripVersionSuffix(value: string): string {
  * 子串命中的收口。真机测量出的误配是 `Git` ⊂ `vs_githubprotocolhandlermsi`、`微信` ⊂ `企业微信`
  * （旧写法是无界 `includes`，双向都算命中）；而唯一合法的命中 `WPS Office` ⊂ `WPS Office (12.1.0.28488)`
  * 是**前缀**关系。只按长度卡会误伤 `钉钉` ⊂ `钉钉6.5.0` 这类短名产品，
- * 所以规则是：短的必须是长的前缀，且短于 5 字符时后面必须紧跟版本号数字。
+ * 所以规则是：短的必须是长的**前缀**，且尾巴只能是限定词（版本号 / 架构 / 括号组 / 版·Pro 一类词）。
+ *
+ * 尾巴必须「全是限定词」而不是「首字符是数字或名字够长」：真机里
+ * `Microsoft Edge` ⊂ `Microsoft Edge WebView2 Runtime` 满足旧条件（前缀且 ≥5 字符）却是**另一个组件**，
+ * 会被当成 Edge 的在装版本比大小；而合法形状 `演示应用` ⊂ `演示应用 (x64) 2.0.0` 的尾巴是括号限定词，
+ * 必须放行（升级侧测试已把它钉为合法关系）。
  */
+/**
+ * 尾巴只允许「限定词」：版本号、架构、括号组、以及一小组已知的发行版后缀词。
+ * 不能把 `a-z` 整段放进字符类——那样 `webview2runtime` 也算通过，等于没收口。
+ * 认不准的尾巴一律拒绝：宁可不给升级候选/不认已装，也不能拿另一个组件的版本来比大小。
+ */
+const QUALIFIER_TOKEN =
+  "(?:x64|x86|x32|arm64|amd64|i386|win32|win64|windows|mac|linux|portable|user|machine|admin|enterprise|community|standard|lite|beta|rc|pro|preview|build|xiii|xii|xi|ix|viii|vii|vi|iv|iii|ii|xl|xx|xv|x|v|i|版|专业版|企业版|正式版|中文|国际|海外|\\d[\\d.\\-+]*|[（）()\\[\\]{}._+\\-]+)";
+const QUALIFIER_TAIL = new RegExp("^(?:" + QUALIFIER_TOKEN + ")+$");
+
+function qualifierTail(remainder: string): boolean {
+  // 归一化已经去掉空格与点号，所以尾巴里的版本号形如 `200`、括号组形如 `(x64)`。
+  return remainder.length > 0 && QUALIFIER_TAIL.test(remainder);
+}
+
 function prefixHit(shorter: string, longer: string): boolean {
   if (!shorter || shorter === longer) return false;
   if (!longer.startsWith(shorter)) return false;
-  return shorter.length >= 5 || /^\d/.test(longer.slice(shorter.length));
+  return qualifierTail(longer.slice(shorter.length));
+}
+
+/**
+ * 名称级匹配可信度：3 精确同名，2 前缀或词根命中，1 仅厂商相关，0 不算数。
+ * 目录视图与升级计划共用这一条判据（#30 的收口 + #28 的「厂商相同不足以配对」），
+ * 不再各写一套匹配——两处规则漂移过一次，就是升级侧那份无界双向子串造成的假可升级项。
+ */
+export function nameMatchQuality(app: AppSummary, item: InstalledApp): number {
+  const target = normalizeName(app.name);
+  const targetStem = stripVersionSuffix(app.name);
+  const name = normalizeName(item.displayName);
+  const stem = stripVersionSuffix(item.displayName);
+  if (name === target) return 3;
+  if (prefixHit(target, name) || prefixHit(name, target)) return 2;
+  if (stem === targetStem && targetStem.length > 3) return 2;
+  if (app.publisher && item.publisher && normalizeName(item.publisher).includes(normalizeName(app.publisher))) return 1;
+  return 0;
 }
 
 export function matchInstalled(app: AppSummary, installed: readonly InstalledApp[]): { app: InstalledApp | null; quality: number } {
-  const target = normalizeName(app.name);
-  const targetStem = stripVersionSuffix(app.name);
   let best: { app: InstalledApp | null; quality: number } = { app: null, quality: 0 };
   for (const item of installed) {
-    const name = normalizeName(item.displayName);
-    const stem = stripVersionSuffix(item.displayName);
-    let quality = 0;
-    if (name === target) quality = 3;
-    else if (prefixHit(target, name) || prefixHit(name, target)) quality = 2;
-    else if (stem === targetStem && targetStem.length > 3) quality = 2;
-    else if (app.publisher && item.publisher && normalizeName(item.publisher).includes(normalizeName(app.publisher))) quality = 1;
+    const quality = nameMatchQuality(app, item);
     if (quality > best.quality) best = { app: item, quality };
   }
   return best;

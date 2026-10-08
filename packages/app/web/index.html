@@ -26,6 +26,7 @@
           <div class="menu-pop" id="main-menu" role="menu" hidden>
             <button role="menuitem" data-view="exclusive">专属应用</button>
             <button role="menuitem" data-view="approvals">我的申请<span class="count" id="count-approvals"></span></button>
+            <button role="menuitem" data-view="admin-approvals">审批工作台</button>
             <button role="menuitem" data-view="cleanup">残留清理</button>
             <button role="menuitem" data-view="settings">设置</button>
             <span class="menu-sep" aria-hidden="true"></span>
@@ -127,6 +128,10 @@
           </div>
           <div id="approval-list" class="rows"></div>
         </section>
+        <section id="view-admin-approvals" class="view" aria-label="审批工作台">
+          <div class="view-head"><h2>审批工作台</h2><p>受理或驳回用户申请；已签发的凭证可在此吊销使其失效。仅管理员令牌可见且可操作。</p></div>
+          <div id="admin-approval-list" class="rows"></div>
+        </section>
 
         <section id="view-cleanup" class="view" aria-label="残留清理">
           <div class="view-head">
@@ -186,6 +191,16 @@
               </div>
               <p class="card-sub" id="repo-meta"></p>
               <ul id="repo-items" class="plain-list"></ul>
+            </div>
+            <div class="setting-card">
+              <h3>残留回收目录</h3>
+              <p class="card-sub">清理残留时文件类条目先移到这里而不是直接删掉；超过保留期或总量上限的最旧条目会被剪枝。清空是不可恢复操作。</p>
+              <div class="row-actions">
+                <button class="ghost" id="btn-recycle-status">刷新占用</button>
+                <button class="ghost" id="btn-recycle-prune">按策略剪枝</button>
+                <button class="ghost" id="btn-recycle-purge">立即清空</button>
+              </div>
+              <p class="card-sub" id="recycle-meta"></p>
             </div>
             <div class="setting-card">
               <h3>客户端更新</h3>

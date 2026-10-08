@@ -221,14 +221,59 @@ function normalize(value: string): string {
   return value.toLowerCase().replace(/[^0-9a-z一-龥]+/g, "");
 }
 
-/** 版本相等才算同一款；名字近似但版本不同要标出来，界面上说清"可升级"。 */
-export function matchInstalledProgram(name: string, version: string | null, installed: readonly InstalledApp[]): DiscoveredPackage["installed"] {
+/** 归一化后的公共前缀长度：越大说明这条候选越具体。 */
+function commonPrefixLength(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+  return i;
+}
+
+/**
+ * 目录视图、升级计划、发现侧三处必须共用同一把判据与同一阈值：
+ * 之前发现侧自成一派，真机上给 `Windows App Certification Kit` 这类基础包认领了
+ * `… SupportedApiList x86` 这条**同族不同子组件**的在装记录（判据打 0 分），
+ * 于是目录里显示「已装 10.1.26100.7705」——那是别的组件的版本。
+ */
+import { nameMatchQuality } from "../catalog/view.ts";
+
+/** 与目录视图、升级计划共用的那把判据：三处必须同一阈值，否则发现侧会认领别人家子组件的版本。 */
+function sameProgram(name: string, app: InstalledApp): boolean {
+  return nameMatchQuality({ name, publisher: "", id: name } as unknown as Parameters<typeof nameMatchQuality>[0], app) >= 2;
+}
+
+/**
+ * 版本相等才算同一款；名字近似但版本不同要标出来，界面上说清"可升级"。
+ *
+ * 取**最具体**的候选，不是清单里第一条能对上的：旧写法是 `installed.find(...)`，
+ * 真机上 `Windows SDK Desktop Headers`／`Desktop Libs`／`Direct X` 三个安装包因此全被并到
+ * 泛用条目 `Windows SDK`（归一化前缀只有 10），而 `Windows SDK Desktop Headers x64`（前缀 24）
+ * 就在同一份清单里排在后面 —— 于是目录给这些包写上了别人的显示名与版本。
+ * 同具体度时再按安装包自己的架构决胜：x64 的包不该认领 arm64 那条的版本。
+ */
+export function matchInstalledProgram(
+  name: string,
+  version: string | null,
+  installed: readonly InstalledApp[],
+  architecture?: string | null,
+): DiscoveredPackage["installed"] {
   const needle = normalize(name);
   if (needle.length < 3) return null;
-  const byName = installed.find((app) => normalize(app.displayName).includes(needle) || needle.includes(normalize(app.displayName))) ??
-    installed.find((app) => app.regDir && normalize(app.regDir).includes(needle));
-  if (!byName) return null;
-  return { displayName: byName.displayName, displayVersion: byName.displayVersion, sameVersion: version ? normalize(byName.displayVersion) === normalize(version) : false };
+  const candidates = installed.filter(
+    (app) =>
+      (normalize(app.displayName).includes(needle) ||
+        needle.includes(normalize(app.displayName)) ||
+        (app.regDir ? normalize(app.regDir).includes(needle) : false)) &&
+      sameProgram(name, app),
+  );
+  if (candidates.length === 0) return null;
+  const wantArch = normalize(architecture ?? "");
+  const prefixOf = (app: InstalledApp) => commonPrefixLength(needle, normalize(app.displayName));
+  const archOf = (app: InstalledApp) => (wantArch && normalize(app.displayName).includes(wantArch) ? 1 : 0);
+  const best = candidates.reduce((a, b) => {
+    if (archOf(b) !== archOf(a)) return archOf(b) > archOf(a) ? b : a;
+    return prefixOf(b) > prefixOf(a) ? b : a;
+  });
+  return { displayName: best.displayName, displayVersion: best.displayVersion, sameVersion: version ? normalize(best.displayVersion) === normalize(version) : false };
 }
 
 /** PE 资源优先，其次文件名，最后文件名去后缀——三种来源在界面上要区分开。 */
@@ -247,14 +292,20 @@ export function toPackage(candidate: InstallerCandidate, version: PeVersionInfo 
   if (candidate.root === "package-cache") notes.push("burn-cache");
   const scored = installerScore(candidate, version, fileName);
   for (const reason of scored.reasons) if (!notes.includes(reason)) notes.push(reason);
+  const matched = matchInstalledProgram(name, appVersion === "0.0.0" ? null : appVersion, installed, parsed.architecture);
+  // 文件名派生的名字是被 `parseInstallerName` 的驼峰拆分造出来的：真机已发布目录 86 条里有 **14 条**
+  // 是这种错拼（`WinRT`→`Win RT`、`IoT`→`Io T`、`WinAppDeploy`→`Win App Deploy`），
+  // 而这 14 条在注册表里都有权威拼写。只在「去掉空格与标点之后完全相同」时替换，
+  // 于是 `Ditto`（已装项叫 `Ditto 3.24.246.0`）这类带尾巴的匹配不会被改名；PE 给了产品名时也不覆盖。
+  const spelling = !fromPe && matched && normalize(name) === normalize(matched.displayName) ? matched.displayName : name;
   return {
     candidate,
     version,
-    name,
+    name: spelling,
     publisher,
     appVersion,
     architecture: parsed.architecture,
-    installed: matchInstalledProgram(name, appVersion === "0.0.0" ? null : appVersion, installed),
+    installed: matched,
     naming: fromPe ? "pe-version" : parsed.version || parsed.architecture ? "filename" : "basename",
     notes,
     installerScore: scored.score,

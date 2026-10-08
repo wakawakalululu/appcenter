@@ -7,6 +7,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { CatalogDb, createApi, materializeDemoPackages, seedDemo } from "../src/server.ts";
 import { AppCenterFacade, type WindowHost } from "@appcenter/core";
+import { makeTrackedTmp } from "../../core/test/util/tmp-dirs.ts";
 
 class NoopHost implements WindowHost {
   async create(): Promise<string> {
@@ -18,7 +19,7 @@ class NoopHost implements WindowHost {
   async focus(): Promise<void> {}
 }
 
-const packageRoot = await mkdtemp(path.join(tmpdir(), "repo-pkgs-"));
+const packageRoot = await makeTrackedTmp("repo-pkgs-");
 const db = CatalogDb.memory("repo-secret");
 const server = createApi({ db, packageRoot, adminToken: "admin-token" });
 let base = "";
@@ -45,7 +46,7 @@ after(async () => {
 });
 
 async function facadeFor(userId: string): Promise<AppCenterFacade> {
-  const dataDir = await mkdtemp(path.join(tmpdir(), "repo-data-"));
+  const dataDir = await makeTrackedTmp("repo-data-");
   return new AppCenterFacade({ serverUrl: base, userId, dataDir, appVersion: "1.0.0", token: "admin-token", registryKeys: [] }, new NoopHost());
 }
 
@@ -86,7 +87,19 @@ test("allVersions mirrors every published version", async () => {
   const facade = await facadeFor("repo-all");
   await facade.refreshCatalog();
   const report = await facade.syncLocalRepo({ allVersions: true });
-  assert.equal(report.saved.length, versionCount, "全部版本落盘");
+  // 这条用例出现过一次整包并发下的偶发红，而当时的断言只留下一句「2 != 25」，无法归因。
+  // 失败必须自带证据：哪几条没落盘、是下载失败还是被当成缓存、原因是什么。
+  assert.deepEqual(report.failed, [], "有版本没下载成功：" + JSON.stringify(report.failed));
+  assert.equal(
+    report.saved.length,
+    versionCount,
+    `全部版本落盘：saved=${String(report.saved.length)}/${String(versionCount)}，` +
+      `意外命中缓存的=${JSON.stringify(report.cached)}，仓库根=${report.root}`,
+  );
   const status = await facade.localRepoStatus();
-  assert.equal(status.saved, versionCount);
+  assert.equal(
+    status.saved,
+    versionCount,
+    `清单回读的落盘数要对得上：failed=${String(status.failed)} pending=${String(status.pending)}`,
+  );
 });

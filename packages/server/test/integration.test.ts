@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { CatalogDb, createApi } from "@appcenter/server";
 import { createBridge } from "@appcenter/app";
+import { makeTrackedTmp } from "../../core/test/util/tmp-dirs.ts";
 import {
   AppCenterFacade,
   Downloader,
@@ -29,7 +30,7 @@ class NullHost implements WindowHost {
 const sha = (buffer: Buffer): string => createHash("sha256").update(buffer).digest("hex");
 
 async function bootCatalog(): Promise<{ base: string; db: CatalogDb; packageRoot: string; close: () => Promise<void> }> {
-  const packageRoot = await mkdtemp(path.join(tmpdir(), "itg-pkgs-"));
+  const packageRoot = await makeTrackedTmp("itg-pkgs-");
   const db = CatalogDb.memory("itg-secret");
   const api = createApi({ db, packageRoot, adminToken: "admin" });
   const port = await new Promise<number>((resolve) => api.listen(0, "127.0.0.1", () => resolve((api.address() as AddressInfo).port)));
@@ -105,7 +106,7 @@ test("resumed download against the real Range endpoint lands the exact package",
       );
     }) as typeof fetch;
 
-    const dir = await mkdtemp(path.join(tmpdir(), "itg-dl-"));
+    const dir = await makeTrackedTmp("itg-dl-");
     const target = path.join(dir, "big.bin");
     const downloader = new Downloader({ fetchImpl: flakyFetch, attempts: 3, baseDelayMs: 1, sidecarFlushBytes: 512 });
     const result = await downloader.download({
@@ -131,7 +132,7 @@ test("self update publishes, checks, stages and commits through the bridge", asy
   const catalog = await bootCatalog();
   const closeCatalog = catalog.close;
   try {
-    const dataDir = await mkdtemp(path.join(tmpdir(), "itg-ui-"));
+    const dataDir = await makeTrackedTmp("itg-ui-");
     const facade = new AppCenterFacade(
       { serverUrl: catalog.base, userId: "me", dataDir, appVersion: "1.0.0" },
       new NullHost(),

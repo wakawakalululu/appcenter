@@ -218,6 +218,20 @@ function bannerBackground(image) {
   return ' style="background-image:url(&quot;' + safe(url) + '&quot;)"';
 }
 
+/**
+ * 文档截图模式：`/?mask=1` 时把家目录前缀换成占位符。
+ * 设置页要显示真实的下载目录与配置文件路径，而这些路径在真机上必然带出个人用户名 ——
+ * 公开文档用的截图就是从这一页截的，所以给同一页加一条"只换显示、不改数据"的开关：
+ * 默认关闭（用户仍看得到自己的真实路径），开著才能拿去当 README/Pages 的配图。
+ */
+const MASK_PATHS = new URLSearchParams(location.search).get("mask") === "1";
+function maskPath(value) {
+  const text = String(value ?? "");
+  if (!MASK_PATHS) return text;
+  // 不能锚 ^：真实文案里家目录路径是嵌在句子中间的（前面还带着「配置文件」这类前缀词），锚住就等于没脱敏。
+  return text.replace(/([A-Za-z]:[\\/]+Users)[\\/]+[^\\/]+/gi, "$1\\<用户>").replace(/([\\/]+home)[\\/]+[^\\/]+/g, "$1/<用户>");
+}
+
 function renderHome(home) {
   el("banners").innerHTML = (home.banners || [])
     .map(
@@ -273,7 +287,7 @@ async function refreshHome() {
   await refreshBadge();
 }
 
-const VIEWS = ["home", "exclusive", "categories", "search", "installed", "upgrade", "approvals", "cleanup", "settings"];
+const VIEWS = ["home", "exclusive", "categories", "search", "installed", "upgrade", "approvals", "admin-approvals", "cleanup", "settings"];
 
 function viewFromHash() {
   const name = String(location.hash || "").replace(/^#\/?/, "");
@@ -314,6 +328,7 @@ async function hydrate(view) {
     if (view === "installed") await loadInstalled();
     if (view === "upgrade") await loadUpgrades();
     if (view === "approvals") await loadApprovals();
+    if (view === "admin-approvals") await loadAdminApprovals();
     if (view === "settings") await loadSettings();
     // 直接从地址栏进搜索页时给引导，而不是留一块空白。
     if (view === "search" && !el("search").value.trim() && !el("grid-search").children.length) {
@@ -407,8 +422,8 @@ async function loadInstalled() {
       (a) =>
         '<div class="row"><div><strong>' + safe(a.displayName) + '</strong> <span class="app-desc">v' + safe(a.displayVersion) + " · " + safe(a.publisher) + "</span>" +
         '<div class="path">' + safe(a.installLocation || a.registryPath) + "</div></div>" +
-        '<button class="ghost" data-residue="' + safe(a.displayName) + '">扫描残留</button>' +
-        '<button class="danger" data-uninstall="' + safe(a.displayName) + '">卸载</button></div>',
+        '<button class="ghost" data-residue="' + safe(a.displayName) + '" data-regdir="' + safe(a.regDir) + '">扫描残留</button>' +
+        '<button class="danger" data-uninstall="' + safe(a.displayName) + '" data-regdir="' + safe(a.regDir) + '">卸载</button></div>',
     )
     .join("");
 }
@@ -429,7 +444,12 @@ async function loadUpgrades() {
         .map(
           (c) =>
             '<div class="row"><div><strong>' + safe(c.name) + '</strong> <span class="app-desc">' + safe(c.installedVersion) + " → " + safe(c.availableVersion) + "</span>" +
-            '<div class="path">' + safe(c.releaseNotes || c.reason) + "</div></div>" +
+            '<div class="path">' + safe(c.releaseNotes || c.reason) +
+            // 同名多实例要说清楚「按哪条定的」，否则界面显示的 installedVersion 会让人以为机器上只有那一条。
+            (c.installedVariants
+              ? " · 本机有 " + String(c.installedVariants.length) + " 条同名实例（" + safe(c.installedVariants.join(" / ")) + "），按最低的 " + safe(c.installedVersion) + " 定"
+              : "") +
+            "</div></div>" +
             '<button class="ghost" data-detail="' + safe(c.appId) + '">详情</button>' +
             '<button class="primary" data-action="upgrade" data-id="' + safe(c.appId) + '">升级</button></div>',
         )
@@ -455,6 +475,27 @@ async function loadApprovals() {
         )
         .join("")
     : '<p class="card-sub">还没有提交过申请。</p>';
+}
+
+/** 审批工作台（管理端）：拉取全量工单，pending 给受理/驳回，已批准给吊销。 */
+async function loadAdminApprovals() {
+  const list = await rpc("approval.listAll");
+  el("admin-approval-list").innerHTML = list.length
+    ? list
+        .map((r) => {
+          const pending = r.status === "pending";
+          const approved = r.status === "approved" || r.status === "granted";
+          const actions =
+            (pending
+              ? '<button class="primary" data-approve="' + safe(r.id) + '">受理</button><button class="ghost" data-reject="' + safe(r.id) + '">驳回</button>'
+              : "") + (approved ? '<button class="ghost" data-revoke="' + safe(r.id) + '">吊销</button>' : "");
+          return (
+            '<div class="row"><div><strong>' + safe(r.appId) + "</strong> <span class=\"app-desc\">" + safe(r.appVersion) + " · " + safe(r.applicant) + " · " + safe(r.status) + "</span>" +
+            '<div class="path">' + safe(r.reason) + (r.decidedBy ? " · 处理人 " + safe(r.decidedBy) : "") + "</div></div>" + actions + "</div>"
+          );
+        })
+        .join("")
+    : '<p class="card-sub">暂无审批工单。</p>';
 }
 
 async function openDetail(appId) {
@@ -592,11 +633,11 @@ async function loadSettings() {
   const dirs = await rpc("runtime.dirs");
   el("set-dirs").textContent = "安装包目录 " + String(dirs.packageDir).split(/[\\/]/).slice(-1)[0] + "… · 图标缓存 " + String(dirs.iconCount) + " 个";
   const runtime = await rpc("runtime.config");
-  el("set-download-dir").value = runtime.config.downloadDir || "";
+  el("set-download-dir").value = maskPath(runtime.config.downloadDir || "");
   el("set-concurrency").value = String(runtime.config.concurrency);
   el("set-cleanup").checked = runtime.config.installerCleanup === true;
   el("set-interval").value = String(runtime.config.updateCheckIntervalMinutes);
-  el("runtime-issues").textContent = "配置文件 " + runtime.file;
+  el("runtime-issues").textContent = maskPath("配置文件 " + runtime.file);
   paintSchedule(runtime.scheduler);
   await loadNotifications();
   const pending = await rpc("selfupdate.pending");
@@ -609,6 +650,17 @@ async function loadSettings() {
 }
 
 const REPO_STATUS_LABEL = { saved: "已保存", failed: "失败", pending: "待取" };
+
+async function paintRecycle() {
+  try {
+    const s = await rpc("cleanup.recycle");
+    el("recycle-meta").textContent =
+      s.root + " · " + String(s.entries.length) + " 项 · 合计 " + (s.totalBytes / 1048576).toFixed(1) +
+      " MB · 保留 " + String(s.keepDays) + " 天 / 上限 " + (s.maxBytes / 1073741824).toFixed(1) + " GB";
+  } catch (err) {
+    el("recycle-meta").textContent = "读取回收目录失败：" + (err && err.message ? err.message : String(err));
+  }
+}
 
 async function paintRepo() {
   try {
@@ -674,16 +726,24 @@ async function loadNotifications() {
     : "<li>没有待确认的审批通知</li>";
 }
 
-async function scanResidue(name) {
+async function scanResidue(name, regDir) {
   try {
-    state.report = await rpc("residue.report", { name });
+    state.report = await rpc("residue.report", { name, regDir });
   } catch (err) {
     return fail(err);
   }
   showView("cleanup");
   el("cleanup-name").value = name;
   const counts = state.report.counts;
+  const gaps = state.report.gaps || [];
+  // 少扫一段与「真没有残留」在列表里长得一样，所以必须显式说出来：清理计划的拒绝逻辑也在这之上。
+  const gapBanner = gaps.length
+    ? '<div class="meta"><span class="risk-high">本次扫描不完整：' +
+      safe(gaps.map((g) => g.kind + "（" + g.source + "）").join("、")) +
+      "，清理计划已停用，请修复读取后重新扫描</span></div>"
+    : "";
   el("residue-report").innerHTML =
+    gapBanner +
     '<div class="meta"><span>' + safe(name) + " · " + String(state.report.items.length) + " 项残留</span><span>" + Object.entries(counts).filter(([, n]) => n > 0).map(([k, n]) => k + "=" + String(n)).join(" ") + "</span></div>" +
     '<div class="meta"><span>分段耗时 ' + Object.entries(state.report.durationMs).map(([k, n]) => k + " " + String(n) + "ms").join(" / ") + "</span></div>" +
     state.report.items
@@ -731,7 +791,7 @@ document.addEventListener("click", async (event) => {
   // 菜单外任意点击都先收起，菜单项本身由 trigger 分支处理。
   if (!event.target.closest || !event.target.closest(".menu-host")) closeMenu();
   // 只有列在这里的选择器会进分发表；新增按钮必须同步加进来，否则点击会被静默丢弃。
-  const trigger = event.target.closest("[data-action],[data-detail],[data-category],[data-residue],[data-uninstall],[data-grant],[data-rate],[data-close-window],[data-versions],[data-note-done],[data-bundle],[data-view],#bundle-close,#btn-bulk,#btn-upgrade-all,#btn-approval-submit,#btn-residue,#btn-plan,#btn-cleanup-dry,#btn-cleanup-run,#btn-cleanup-restore,#detail-close,#downloads-close,#btn-back,#btn-menu,#btn-downloads,#menu-upgrade-all,#menu-downloads,#btn-min,#btn-max,#btn-close,#btn-selfupdate,#btn-selfupdate-stage,#btn-selfupdate-apply,#btn-save-runtime,#btn-start-checks,#btn-stop-checks,#btn-repo-sync,#btn-repo-sync-all,#btn-repo-status");
+  const trigger = event.target.closest("[data-action],[data-detail],[data-category],[data-residue],[data-uninstall],[data-grant],[data-rate],[data-close-window],[data-versions],[data-note-done],[data-bundle],[data-view],[data-approve],[data-reject],[data-revoke],#bundle-close,#btn-bulk,#btn-upgrade-all,#btn-approval-submit,#btn-residue,#btn-plan,#btn-cleanup-dry,#btn-cleanup-run,#btn-cleanup-restore,#detail-close,#downloads-close,#btn-back,#btn-menu,#btn-downloads,#menu-upgrade-all,#menu-downloads,#btn-min,#btn-max,#btn-close,#btn-selfupdate,#btn-selfupdate-stage,#btn-selfupdate-apply,#btn-save-runtime,#btn-start-checks,#btn-stop-checks,#btn-repo-sync,#btn-repo-sync-all,#btn-repo-status,#btn-recycle-status,#btn-recycle-prune,#btn-recycle-purge");
   if (!trigger) return;
   const id = trigger.dataset.id;
   try {
@@ -746,15 +806,30 @@ document.addEventListener("click", async (event) => {
     if (trigger.dataset.category) return openCategory(trigger.dataset.category);
     if (trigger.dataset.action) return runAction(trigger.dataset.action, id, trigger.dataset.version);
     if (trigger.dataset.uninstall) {
-      const job = await rpc("app.uninstall", { name: trigger.dataset.uninstall });
+      const job = await rpc("app.uninstall", { name: trigger.dataset.uninstall, regDir: trigger.dataset.regdir });
       toast("卸载结束，状态 " + job.state);
       await loadInstalled();
       return;
     }
-    if (trigger.dataset.residue) return scanResidue(trigger.dataset.residue);
+    if (trigger.dataset.residue) return scanResidue(trigger.dataset.residue, trigger.dataset.regdir);
     if (trigger.dataset.grant) {
       await rpc("approval.attachGrant", { requestId: trigger.dataset.grant });
       return toast("凭证已注入，可重试安装");
+    }
+    if (trigger.dataset.approve) {
+      await rpc("approval.decide", { requestId: trigger.dataset.approve, decision: "approved" });
+      toast("已受理");
+      return loadAdminApprovals();
+    }
+    if (trigger.dataset.reject) {
+      await rpc("approval.decide", { requestId: trigger.dataset.reject, decision: "rejected" });
+      toast("已驳回");
+      return loadAdminApprovals();
+    }
+    if (trigger.dataset.revoke) {
+      await rpc("approval.revoke", { requestId: trigger.dataset.revoke });
+      toast("已吊销，凭证失效");
+      return loadAdminApprovals();
     }
     if (trigger.dataset.rate) {
       await rpc("catalog.rate", { appId: trigger.dataset.rate, stars: Number(el("rate-stars").value), comment: el("rate-comment").value, verifiedInstall: true });
@@ -826,6 +901,18 @@ document.addEventListener("click", async (event) => {
     if (trigger.id === "btn-repo-sync") return runRepoSync(false);
     if (trigger.id === "btn-repo-sync-all") return runRepoSync(true);
     if (trigger.id === "btn-repo-status") return paintRepo();
+    if (trigger.id === "btn-recycle-status") return paintRecycle();
+    if (trigger.id === "btn-recycle-prune") {
+      const r = await rpc("cleanup.recyclePrune", {});
+      toast("剪掉 " + String(r.deleted.length) + " 项，释放 " + (r.bytesReclaimed / 1048576).toFixed(1) + " MB");
+      return paintRecycle();
+    }
+    if (trigger.id === "btn-recycle-purge") {
+      if (!window.confirm("清空回收目录会永久删除其中所有残留文件，不可恢复。继续？")) return;
+      const r = await rpc("cleanup.recyclePurge", { confirmToken: "CONFIRM" });
+      toast("已清空 " + String(r.deleted.length) + " 项，释放 " + (r.bytesReclaimed / 1048576).toFixed(1) + " MB");
+      return paintRecycle();
+    }
     if (trigger.id === "btn-selfupdate") {
       const check = await rpc("selfupdate.check");
       state.selfUpdate = check.manifest;

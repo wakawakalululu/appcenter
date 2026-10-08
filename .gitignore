@@ -11,6 +11,9 @@ runtime-config.json
 inventory-cache.json
 backup-manifest.json
 appcenter.lock
+# demo 作业在本机试跑时会留下这两个（CI 上是临时工作区，无所谓）：
+# pid 文件没有扩展名，不列进来的话会被 `git add -A` 一起提交。
+*.pid
 
 # 安装包与日志（发布产物，不入库）
 *.part
@@ -32,6 +35,12 @@ smoke-packages/
 
 # 本地内部说明（不随仓库分发）
 LOCAL-NOTES.md
+# §1 合规闸门的输出物：结论带授权与边界细节，只留本地
+compliance-checklist.md
+# P0/P1/P2 的分析产物与范围说明书（§6.1 点名"绝不推送"；CI 守卫里也有一条同判据的正则兜底）
+re/
+recon/
+behavior/
 _internal/
 
 # Tauri / Rust 构建产物（源码骨架已入库）

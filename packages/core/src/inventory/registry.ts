@@ -209,7 +209,13 @@ export class InMemoryRegClient implements RegClient {
 
   async queryTree(rootPath: string): Promise<RegistryKey[]> {
     const prefix = canonicalHive(rootPath).toLowerCase().replace(/\\+$/, "");
-    return this.keys.filter((k) => canonicalHive(k.path).toLowerCase().startsWith(prefix));
+    // 必须按**键边界**匹配：`...\Run` 是 `...\RunOnce` 的字符串前缀，裸 startsWith 会把兄弟键
+    // 当成自己的子树返回，而真机 `reg.exe query <root> /s` 只返回该键自己与其子键。
+    // 桩比真实实现宽，测试就会出现「读到了根上并不存在的项」，足以把按根隔离这类判据糊成假绿。
+    return this.keys.filter((k) => {
+      const key = canonicalHive(k.path).toLowerCase();
+      return key === prefix || key.startsWith(prefix + "\\");
+    });
   }
 
   async queryChildren(rootPath: string): Promise<string[]> {

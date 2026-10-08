@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { InMemoryRegClient, UNINSTALL_ROOTS, regKey, scanInstalledApps, scanResidue, type FileSystemProbe } from "@appcenter/core";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { makeTrackedTmp } from "./util/tmp-dirs.ts";
 
 const BS = String.fromCharCode(92);
 
@@ -48,7 +49,7 @@ class CountingProbe implements FileSystemProbe {
 }
 
 test("menu and shortcut segments share one start-menu walk and keep the item order", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "menu-walk-"));
+  const dir = await makeTrackedTmp("menu-walk-");
   const common = path.join(dir, "common");
   const sub = path.join(common, "Sub");
   const user = path.join(dir, "user");

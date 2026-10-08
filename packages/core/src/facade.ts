@@ -7,6 +7,7 @@ import type { AppDetail, AppSummary, Category, RatingDistribution, RatingInput }
 import { buildCategoryTree, categorySubtreeIds, searchCatalog, type CategoryNode, type SearchHit, type SearchQuery } from "./catalog/search.ts";
 import { scanInstalledApps, type InstalledApp } from "./inventory/inventory.ts";
 import { InstalledAppCache, cachedInstalledApps } from "./inventory/cache.ts";
+import { resolveInstalledInstance } from "./inventory/select.ts";
 import { InMemoryRegClient, RegExeClient, type RegClient, type RegistryKey } from "./inventory/registry.ts";
 import { scanResidue, type FileSystemProbe, type ResidueReport, type ScanEnv } from "./leftover/scan.ts";
 import { exportRegistryKey } from "./leftover/backup.ts";
@@ -19,6 +20,7 @@ import {
   type CleanupPolicy,
   type PlanResult,
 } from "./leftover/cleanup.ts";
+import { pruneRecycle, purgeRecycle, recycleStatus, type PruneOptions, type PruneResult, type RecycleStatus } from "./leftover/recycle.ts";
 import { ChildProcessRunner, type ProcessRunner } from "./runner/executor.ts";
 import { RuntimeConfigStore, type RuntimeConfig, type RuntimeConfigIssue } from "./runtime/config.ts";
 import { IconCache, iconSourceOf } from "./inventory/icons.ts";
@@ -32,7 +34,7 @@ import {
   type CategorySection,
 } from "./catalog/view.ts";
 import { InstallOrchestrator, type InstallJob, type JobState } from "./orchestrator/installer.ts";
-import { LocalRepo, type RepoStatus, type RepoSyncReport } from "./localrepo/repo.ts";
+import { LocalRepo, localFileDownloader, type RepoStatus, type RepoSyncReport } from "./localrepo/repo.ts";
 import { ApprovalWorkflow, type ApprovalRequest } from "./approval/workflow.ts";
 import { buildUpgradePlan, summarizePlan, type UpgradeCandidate } from "./upgrader/plan.ts";
 import { SelfUpdater, type CheckResult, type SelfUpdateManifest, type StagedUpdate, type SwapOutcome } from "./selfupdate/selfupdate.ts";
@@ -49,11 +51,40 @@ import {
 } from "./tray/state.ts";
 import { AutoStartController, RegAutoStartBackend, type AutoStartBackend } from "./runtime/autostart.ts";
 
+/** 服务端审批工单投影 → 本地 ApprovalRequest，供「我的申请」与管理员视图共用。 */
+function approvalRequestFromTicket(t: {
+  requestId: string;
+  appId: string;
+  appVersion: string;
+  applicant: string;
+  status: string;
+  reason: string;
+  createdAt: string;
+  decidedAt?: string;
+  decidedBy?: string;
+  expiresAt?: string;
+}): ApprovalRequest {
+  return {
+    id: t.requestId,
+    appId: t.appId,
+    appVersion: t.appVersion,
+    applicant: t.applicant,
+    reason: t.reason,
+    status: t.status as ApprovalRequest["status"],
+    createdAt: t.createdAt,
+    decidedAt: t.decidedAt || undefined,
+    decidedBy: t.decidedBy || undefined,
+    expiresAt: t.expiresAt || undefined,
+  };
+}
+
 export interface FacadeConfig {
   serverUrl: string;
   userId: string;
   /** 下载缓存、审批凭证与自升级暂存的根目录。 */
   dataDir: string;
+  /** 本地应用包仓库根目录；不传默认 `<dataDir>/local-repo`。 */
+  localRepoDir?: string;
   appVersion: string;
   /** 测试与离线演示时注入内存注册表。 */
   registryKeys?: readonly RegistryKey[];
@@ -257,6 +288,7 @@ export class AppCenterFacade {
   private readonly approvals: ApprovalWorkflow;
   private readonly reg: RegClient;
   private readonly orchestrator: InstallOrchestrator;
+  private readonly localRepo: LocalRepo;
   private readonly selfUpdater: SelfUpdater;
   private readonly iconCache: IconCache;
   private readonly runtime: RuntimeConfigStore;
@@ -291,6 +323,14 @@ export class AppCenterFacade {
       downloadDir: path.join(config.dataDir, "packages"),
     });
     this.downloader = new Downloader({ concurrency: 2 });
+    this.localRepo = new LocalRepo({
+      downloader: this.downloader,
+      root: config.localRepoDir ?? path.join(config.dataDir, "local-repo"),
+      verify: "size",
+      // 目录里的 downloadUrl 常是相对路径（/dl/...）：单例同样要补全，否则 sync 到磁盘的
+      // url 字段是相对值，离线 resolve / 二次下载会以「Failed to parse URL」整体失败。
+      urlBase: config.serverUrl,
+    });
     void this.runtime
       .load()
       .then((cfg) => this.downloader.setConcurrency(cfg.concurrency))
@@ -312,6 +352,8 @@ export class AppCenterFacade {
         installerCleanup: async () => (await this.runtime.load()).installerCleanup,
         userId: config.userId,
         grantStore: this.grants,
+        resolveLocalPackage: (appId, version, downloadUrl) => this.localRepo.resolve(appId, version, downloadUrl),
+        fileDownloader: localFileDownloader,
       },
       { concurrency: 1 },
     );
@@ -479,8 +521,8 @@ export class AppCenterFacade {
     return this.orchestrator.enqueue(appId, { phase: "upgrade" });
   }
 
-  uninstall(nameOrId: string): Promise<InstallJob> {
-    return this.orchestrator.uninstall(nameOrId);
+  uninstall(nameOrId: string, regDir?: string): Promise<InstallJob> {
+    return this.orchestrator.uninstall(nameOrId, regDir);
   }
 
   jobs(): InstallJob[] {
@@ -514,13 +556,45 @@ export class AppCenterFacade {
     return { handled: false };
   }
 
-  approvalRequests(): ApprovalRequest[] {
-    return this.approvals.list({ applicant: this.config.userId });
+  /**
+   * 过去只读本机内存：管理员已批准/驳回的状态不会回流，前端「我的申请」永远停在 pending。
+   * 现在以服务端为权威源，拉取后同步回本地工作流（凭证校验依赖它）；服务端不可达再退回本地清单。
+   */
+  async approvalRequests(): Promise<ApprovalRequest[]> {
+    try {
+      const tickets = await this.remote.myApprovals(this.config.userId);
+      for (const t of tickets) this.approvals.track(approvalRequestFromTicket(t));
+      return tickets.map(approvalRequestFromTicket);
+    } catch {
+      return this.approvals.list({ applicant: this.config.userId });
+    }
   }
 
-  async residueReport(nameOrId: string): Promise<ResidueReport> {
-    const target = (await this.installed()).find((i) => i.displayName === nameOrId || i.regDir === nameOrId);
-    if (!target) throw new Error("not installed: " + nameOrId);
+  /** 管理端：拉取全部审批工单（需要管理员令牌）。 */
+  async adminApprovalList(): Promise<ApprovalRequest[]> {
+    const tickets = await this.remote.adminApprovals();
+    for (const t of tickets) this.approvals.track(approvalRequestFromTicket(t));
+    return tickets.map(approvalRequestFromTicket);
+  }
+
+  /** 管理员受理 / 驳回；decidedBy 默认当前用户。 */
+  async decideApproval(requestId: string, decision: "approved" | "rejected", note = ""): Promise<boolean> {
+    const res = await this.remote.decideApproval(requestId, decision, this.config.userId, note);
+    return res.ok;
+  }
+
+  /** 管理员吊销已签发 / 待处理的凭证（落库为 revoked，使已发凭证失效）。 */
+  async revokeApproval(requestId: string): Promise<boolean> {
+    const res = await this.remote.revokeApproval(requestId);
+    return res.ok;
+  }
+
+  /**
+   * 残留报告按**行**取：这份报告会直接喂 `cleanupPlan`/`applyCleanup`，
+   * 选错实例就意味着「按 A 的残留确认清理、实际删的是 B 的键与目录」。
+   */
+  async residueReport(nameOrId: string, regDir?: string): Promise<ResidueReport> {
+    const target = resolveInstalledInstance(await this.installed(), { nameOrId, regDir });
     return scanResidue(target, { reg: this.reg, fs: nodeProbe, env: defaultScanEnv() });
   }
 
@@ -529,9 +603,14 @@ export class AppCenterFacade {
   }
 
   applyCleanup(report: ResidueReport, policy: CleanupPolicy, dryRun = true): Promise<CleanupOutcome> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const withBackup: CleanupPolicy = {
       ...policy,
-      backupDir: policy.backupDir ?? path.join(this.config.dataDir, "cleanup-backups", new Date().toISOString().replace(/[:.]/g, "-")),
+      backupDir: policy.backupDir ?? path.join(this.config.dataDir, "cleanup-backups", stamp),
+      // 默认「移动到回收目录」而不是就地递归删除：move 失败只让该项算 failed、残留原地留着，
+      // 不会退化成半删。要真正回收磁盘空间，调用方显式传 recycleDir: ""（空串走 nullish 分支）。
+      // 跨盘移动会 EXDEV 报错而该项 failed——宁可让人再点一次，也不在这里偷偷 copy+rm。
+      recycleDir: policy.recycleDir ?? path.join(this.config.dataDir, "cleanup-recycle", stamp),
     };
     return executeCleanup(
       report,
@@ -540,10 +619,39 @@ export class AppCenterFacade {
         deleteRegistryKey: regDeleteKey,
         deleteRegistryValue: regDeleteValue,
         deletePath: (target, recursive) => fs.rm(target, { recursive, force: true }).then(() => undefined),
+        movePath: async (from, to) => {
+          await fs.mkdir(path.dirname(to), { recursive: true });
+          await fs.rename(from, to);
+        },
         exportRegistryKey,
       },
       { dryRun },
-    );
+    ).then(async (outcome) => {
+      // 回收目录若只进不出，几次清理就会把系统盘占满：顺手按默认策略剪一刀。
+      // 剪枝失败不该让本次清理算失败，所以吞掉错误只留痕。
+      await this.pruneRecycle().catch((err: unknown) => {
+        console.error("recycle prune after cleanup failed: " + (err instanceof Error ? err.message : String(err)));
+      });
+      return outcome;
+    });
+  }
+
+  /** 回收根：#26 之后文件类残留先移到这里，保留策略见 leftover/recycle.ts。 */
+  recycleDir(): string {
+    return path.join(this.config.dataDir, "cleanup-recycle");
+  }
+
+  recycleStatus(): Promise<RecycleStatus> {
+    return recycleStatus(this.recycleDir());
+  }
+
+  pruneRecycle(options: PruneOptions = {}): Promise<PruneResult> {
+    return pruneRecycle(this.recycleDir(), options);
+  }
+
+  /** 整盘清空回收目录：破坏性操作，必须带确认串。 */
+  purgeRecycle(confirmToken: string): Promise<PruneResult> {
+    return purgeRecycle(this.recycleDir(), confirmToken);
   }
 
   /** 申请提交到服务端，本地工作流只保留同一份记录用于状态展示与凭证校验。 */
@@ -703,18 +811,16 @@ export class AppCenterFacade {
    */
   async syncLocalRepo(options: { allVersions?: boolean; dir?: string; verify?: "size" | "sha256" } = {}): Promise<RepoSyncReport> {
     if (this.catalogCache.length === 0) await this.refreshCatalog();
-    const repo = new LocalRepo({
-      downloader: this.downloader,
-      root: options.dir ?? path.join(this.config.dataDir, "local-repo"),
-      verify: options.verify,
-      urlBase: this.config.serverUrl,
-    });
+    const repo =
+      options.dir
+        ? new LocalRepo({ downloader: this.downloader, root: options.dir, verify: options.verify, urlBase: this.config.serverUrl })
+        : this.localRepo;
     return repo.sync({ apps: this.catalogCache, categories: this.categoryCache, allVersions: options.allVersions });
   }
 
   /** 盘点本地仓库：清单条目按磁盘事实重算状态。 */
   async localRepoStatus(dir?: string): Promise<RepoStatus> {
-    const repo = new LocalRepo({ downloader: this.downloader, root: dir ?? path.join(this.config.dataDir, "local-repo") });
+    const repo = dir ? new LocalRepo({ downloader: this.downloader, root: dir }) : this.localRepo;
     return repo.status();
   }
 
@@ -889,6 +995,24 @@ export class AppCenterFacade {
     try {
       const { spawn } = await import("node:child_process");
       const child = spawn(target, [], { detached: true, stdio: "ignore", windowsHide: true });
+      // spawn 的 ENOENT/EACCES 不在这个 try 里：它是异步 'error' 事件（实测栈顶是
+      // ChildProcess._handle.onexit）。没有监听器就是 Unhandled 'error' → 宿主进程 exit 1，
+      // 于是「点一下打开一个已卸载应用的残留图标」就能把托盘/桌面壳打死。
+      // 也不能直接回 launched:true——那是谎报；等 'spawn'/'error' 谁先到再回答，
+      // 并给一个兜底超时，避免这个 UI 调用被挂住。
+      const failure = await new Promise<string | null>((resolve) => {
+        let settled = false;
+        const settle = (value: string | null): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        };
+        const timer = setTimeout(() => settle(null), 3000);
+        child.once("error", (err) => settle(err instanceof Error ? err.message : String(err)));
+        child.once("spawn", () => settle(null));
+      });
+      if (failure) return { launched: false, message: failure };
       child.unref();
       return { launched: true, message: "已启动 " + target };
     } catch (err) {

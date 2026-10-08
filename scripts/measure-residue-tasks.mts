@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 
-const line = (s: string): void => process.stdout.write(s + "\n");
+const line = (s: string): void => { process.stdout.write(s + "\n"); };
 const tasksRoot = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "Tasks");
 
 interface Stats {
@@ -16,7 +17,7 @@ interface Stats {
 
 async function walk(dir: string, stats: Stats, depth: number): Promise<void> {
   if (depth > 6) return;
-  let entries: Awaited<ReturnType<typeof fs.readdir<{ withFileTypes: true }>>>;
+  let entries: Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch {

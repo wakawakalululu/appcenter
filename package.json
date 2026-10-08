@@ -14,11 +14,12 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
+    "check:scripts": "tsc -p tsconfig.scripts.json",
     "test": "node --experimental-transform-types --test --test-force-exit \"packages/**/test/*.test.ts\"",
-    "ci": "npm run typecheck && npm run check:emoji && npm run test && npm run smoke",
+    "ci": "npm run typecheck && npm run check:scripts && npm run check:emoji && npm run check:links && npm run check:licenses && npm run test && npm run smoke",
     "demo": "node --experimental-transform-types scripts/ui-demo.mts",
     "desktop": "node --experimental-transform-types packages/app/src/desktop.ts",
-    "shots": "node --experimental-transform-types scripts/ui-shot.mts http://127.0.0.1:8080/ .shots skin:fresh,home,categories,installed,upgrade,search 1237x762",
+    "shots": "node --experimental-transform-types scripts/reshoot.mts",
     "server": "node --experimental-transform-types packages/server/src/main.ts",
     "app": "node --experimental-transform-types packages/cli/src/main.ts",
     "ui": "node --experimental-transform-types packages/app/src/main.ts",
@@ -32,7 +33,13 @@
     "build:real-catalog": "node --experimental-transform-types scripts/build-real-catalog.mts",
     "icons": "node packages/app/scripts/gen-icons.mjs --tauri packages/app/src-tauri/icons",
     "tauri": "npm -w @appcenter/app run tauri",
-    "check:emoji": "node scripts/check-emoji.mjs"
+    "check:emoji": "node scripts/check-emoji.mjs",
+    "check:links": "node scripts/check-links.mjs",
+    "check:licenses": "node scripts/check-licenses.mjs",
+    "check:coverage": "node scripts/check-coverage.mjs",
+    "check:commits": "node scripts/check-commit-msg.mjs",
+    "check:delivery": "node scripts/check-delivery.mjs",
+    "clean:tmp": "node scripts/clean-test-tmp.mjs"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

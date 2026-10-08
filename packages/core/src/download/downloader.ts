@@ -49,13 +49,22 @@ export interface DownloaderOptions {
 
 export class DownloadError extends Error {
   constructor(
-    readonly kind: "http-status" | "checksum-mismatch" | "size-mismatch" | "incomplete" | "network" | "cancelled",
+    readonly kind: "http-status" | "checksum-mismatch" | "size-mismatch" | "incomplete" | "network" | "cancelled" | "landing",
     message: string,
     readonly detail: Record<string, string | number> = {},
   ) {
     super(kind + ": " + message);
   }
 }
+
+/**
+ * 可重试的 HTTP 状态：限流、超时与网关类故障换个时刻就成；
+ * 其余 4xx（404/403 等）重试只是白耗一轮，留在 fatal 里。
+ */
+const RETRYABLE_HTTP_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/** 落地原地重试次数：50/100/200ms 累计约 350ms，够覆盖杀软那种一闪而过的占用。 */
+const LANDING_ATTEMPTS = 4;
 
 const partPath = (target: string) => target + ".part";
 const statePath = (target: string) => target + ".part.json";
@@ -158,20 +167,40 @@ export class Downloader {
     }
   }
 
-  /** 同一 id 的并发请求复用同一个 Promise。 */
+  /**
+   * 同一「id + url + target」的并发请求复用同一个 Promise。
+   * 只按 id 去重是错的：id 由调用方给（`appId@version`），换 packageRoot 或换源重下时
+   * id 不变而目标变了，第二个请求会直接拿到第一个的结果，自己的文件根本没下。
+   */
   download(request: DownloadRequest): Promise<DownloadResult> {
-    const existing = this.inFlight.get(request.id);
+    const key = request.id + "\u0000" + request.url + "\u0000" + request.target;
+    const existing = this.inFlight.get(key);
     if (existing) return existing;
-    const task = this.withSlot(() => this.run(request));
-    this.inFlight.set(request.id, task);
-    void task.catch(() => this.inFlight.delete(request.id));
+    const task = this.withSlot(() => this.run(request, key));
+    this.inFlight.set(key, task);
+    void task.catch(() => this.inFlight.delete(key));
     return task;
   }
+
   private async withSlot<T>(fn: () => Promise<T>): Promise<T> {
     if (this.slots > 0) {
       this.slots--;
     } else {
-      await new Promise<void>((resolve) => this.waiters.push(resolve));
+      // 排队途中被取消必须当场落败：旧实现只 push 了一个 resolve，取消要等前一个下载
+      // 结束才轮得到它失败——前一个要是卡住，取消就永远不生效。
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = (): void => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+          reject(new DownloadError("cancelled", "aborted while queued"));
+        };
+        const waiter = (): void => {
+          this.signal?.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        this.signal?.addEventListener("abort", onAbort, { once: true });
+        this.waiters.push(waiter);
+      });
     }
     try {
       return await fn();
@@ -182,12 +211,12 @@ export class Downloader {
     }
   }
 
-  private async run(request: DownloadRequest): Promise<DownloadResult> {
+  private async run(request: DownloadRequest, key: string): Promise<DownloadResult> {
     if (this.signal?.aborted) throw new DownloadError("cancelled", "aborted before start");
     try {
       return await this.attempt(request);
     } finally {
-      this.inFlight.delete(request.id);
+      this.inFlight.delete(key);
     }
   }
 
@@ -211,9 +240,15 @@ export class Downloader {
         return await this.transfer(request);
       } catch (err) {
         lastError = err;
+        const httpStatus = err instanceof DownloadError && err.kind === "http-status" ? Number(err.detail.status) : 0;
         const fatal =
           err instanceof DownloadError &&
-          (err.kind === "cancelled" || err.kind === "checksum-mismatch" || err.kind === "size-mismatch" || err.kind === "http-status");
+          (err.kind === "cancelled" ||
+            err.kind === "checksum-mismatch" ||
+            err.kind === "size-mismatch" ||
+            // 落地失败重下也解决不了：.part 已经校验通过，问题在目标位动不了。
+            err.kind === "landing" ||
+            (err.kind === "http-status" && !RETRYABLE_HTTP_STATUS.has(httpStatus)));
         if (fatal) throw err;
         if (attempt < this.attempts - 1) await sleep(backoff(attempt, this.baseDelayMs), this.signal);
       }
@@ -227,7 +262,12 @@ export class Downloader {
     const resume = await loadSidecar(request.target, request.url);
     const offset = resume?.received ?? 0;
     const headers: Record<string, string> = { ...request.headers };
-    if (offset > 0) headers["Range"] = "bytes=" + String(offset) + "-";
+    if (offset > 0) {
+      headers["Range"] = "bytes=" + String(offset) + "-";
+      // 只发 Range 不发 If-Range：服务端换了文件也照样给一段新内容，拼起来就是
+      // 新旧混合体——带 sha256 时表现为校验失败白下一半，不带时就静默落地。
+      if (resume?.etag) headers["If-Range"] = resume.etag;
+    }
 
     let response: Response;
     try {
@@ -246,6 +286,13 @@ export class Downloader {
     if (startFrom === 0 && offset > 0) {
       await fs.rm(part, { force: true });
       await fs.rm(statePath(request.target), { force: true });
+    }
+    // 服务端没理会 If-Range、照样用新内容回了 206：这时续传必错，丢掉 .part 重来
+    // （incomplete 不在 fatal 之列，外层会立刻再试一轮，那一轮就是全量下载）。
+    const remoteEtag = response.headers.get("etag");
+    if (startFrom > 0 && resume?.etag && remoteEtag && remoteEtag !== resume.etag) {
+      await dropSidecar(request.target);
+      throw new DownloadError("incomplete", "remote changed since " + String(offset) + " bytes (etag " + resume.etag + " -> " + remoteEtag + ")");
     }
     if (!response.body) throw new DownloadError("network", "empty response body");
 
@@ -312,9 +359,40 @@ export class Downloader {
       await dropSidecar(request.target);
       throw new DownloadError("checksum-mismatch", "sha256 mismatch", { expected: request.expectedSha256, actual: sha });
     }
-    await fs.rm(request.target, { force: true });
-    await fs.rename(part, request.target);
+    await this.land(part, request.target);
     await dropSidecar(request.target);
     return { id: request.id, target: request.target, bytes: finalSize, sha256: sha, fromCache: false };
+  }
+
+  /**
+   * 把已校验通过的 .part 换成正式文件。这一段在 Windows 上是「目标位动不了」的高发区：
+   * 杀软或上一轮安装进程占着目标时 rm 与 rename 都会 EPERM（#27 在同一条路径上实测过），
+   * 目标位被同名目录占着时则是 EISDIR。
+   *
+   * 两处要紧的语义：
+   * - 只做**原地**有限重试，绝不退回「重新下载」：字节已经下完并通过校验，重下只是白烧流量；
+   *   旧写法抛的是裸 fs 错误，外层的 fatal 判据认不出来，于是整包被重试了三遍仍然失败。
+   * - 失败收口成 DownloadError("landing") 并带上 code/target，让安装编排与界面能认出
+   *   「这是落地故障」而不是「网络故障」。
+   * - 不悄悄删掉目标位的目录或强闯占用：那属于「猜用户想要什么」，宁可留下 .part 让人再点一次。
+   */
+  private async land(part: string, target: string): Promise<void> {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < LANDING_ATTEMPTS; attempt++) {
+      try {
+        await fs.rm(target, { force: true });
+        await fs.rename(part, target);
+        return;
+      } catch (err) {
+        lastError = err;
+        if (this.signal?.aborted) break;
+        if (attempt < LANDING_ATTEMPTS - 1) await new Promise<void>((resolve) => setTimeout(resolve, 50 * 2 ** attempt));
+      }
+    }
+    const detail: Record<string, string | number> = { target };
+    const code = (lastError as { code?: string } | null)?.code;
+    if (code) detail.code = String(code);
+    if (lastError instanceof Error) detail.reason = lastError.message;
+    throw new DownloadError("landing", "安装包落地失败，目标文件动不了", detail);
   }
 }

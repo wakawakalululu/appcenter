@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { makeTrackedTmp } from "./util/tmp-dirs.ts";
 import {
   ApprovalWorkflow,
   AppCenterFacade,
@@ -241,7 +241,7 @@ test("single-instance roles reuse the window while detail windows stack", async 
 });
 
 test("downloader resumes with Range and only lands verified bytes", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "dl-"));
+  const dir = await makeTrackedTmp("dl-");
   const payload = Buffer.from("0123456789abcdefghijklmnop");
   const sha = createHash("sha256").update(payload).digest("hex");
   const target = path.join(dir, "pkg.bin");
@@ -285,7 +285,7 @@ test("downloader resumes with Range and only lands verified bytes", async () => 
 });
 
 test("downloader refuses a package whose checksum does not match the catalog", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "dl-"));
+  const dir = await makeTrackedTmp("dl-");
   const payload = Buffer.from("good bytes");
   const fetchImpl = (async () =>
     new Response(payload, { status: 200, headers: { "content-length": String(payload.length) } })) as typeof fetch;
@@ -339,7 +339,7 @@ function fakeRunner(exitCode = 0): { run(req: ExecutionRequest): Promise<Executi
 const fakeDownloadPort = (payload: string): { download: (r: unknown) => Promise<DownloadResult>; dir: Promise<string> } => {
   let dirPromise: Promise<string> | null = null;
   return {
-    dir: (dirPromise ??= mkdtemp(path.join(tmpdir(), "orch-"))),
+    dir: (dirPromise ??= makeTrackedTmp("orch-")),
     async download(req: unknown): Promise<DownloadResult> {
       const request = req as { id: string; target: string };
       const buffer = Buffer.from(payload);
@@ -376,7 +376,7 @@ const installedApp = (over: Partial<InstalledApp> = {}): InstalledApp => ({
 });
 
 async function orchestratorWith(options: { detail?: AppDetail; grant?: import("@appcenter/core").Grant | null; exitCode?: number; installerCleanup?: boolean }) {
-  const dir = await mkdtemp(path.join(tmpdir(), "orch-"));
+  const dir = await makeTrackedTmp("orch-");
   const approvals = new ApprovalWorkflow("secret");
   const grants = new Map<string, import("@appcenter/core").Grant>();
   const runner = fakeRunner(options.exitCode ?? 0);
@@ -455,7 +455,7 @@ test("approval-gated apps stop before download until a grant is attached", async
 });
 
 test("self update stages, then rolls back when the new build never reported healthy", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "self-"));
+  const dir = await makeTrackedTmp("self-");
   const port = fakeDownloadPort("payload");
   const staging = path.join(dir, "staging");
   const appDir = path.join(dir, "app");

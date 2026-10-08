@@ -208,8 +208,20 @@ export function parseUninstallCommand(raw: string, quiet: boolean): ExecutionReq
   const head = segments[0] ?? "";
   const isMsi = /msiexec/i.test(head);
   if (isMsi) {
-    const product = (segments[segments.length - 1] ?? "").replace(/^\/[XY]/i, "").replace(/^-([XY])/i, "/$1");
-    return { program: "msiexec.exe", args: ["/x", product, "/qn", "/norestart"], requiresAdmin: true };
+    // 产品码不能靠 token 位置来定：`tokenizeCommandLine` 为了保住带空格的路径，
+    // 会把 `/x {GUID} REMOVE=X` 合成一个 token（前导空格也在里面）。
+    // 这里直接从原始串上认两种真机形态：`{GUID}` 或 `路径.msi`，前面可以是 /x、/X、-X、带不带空格都行。
+    // 旧实现取最后一个 segment 当产品码 ⇒ `msiexec.exe /x {GUID} /qn` 被组装成
+    // ["/x","/qn","/qn","/norestart"]，这类卸载串在真机上极常见，等于卸载必然失败。
+    const product = /[/\-][xy]\s*(\{[0-9A-Fa-f-]{36}\}|[^\s"]+\.msi)/i.exec(raw)?.[1] ?? "";
+    if (!product) {
+      // 认不出产品码时退回旧行为（取末段去前缀），至少不比原来更糟。
+      const fallback = (segments[segments.length - 1] ?? "").replace(/^\/[XY]/i, "").replace(/^-([XY])/i, "/$1");
+      return { program: "msiexec.exe", args: ["/x", fallback, "/qn", "/norestart"], requiresAdmin: true };
+    }
+    // 自定义属性（REMOVE=、REBOOT= 之类）要保留；其余开关由我们统一补 /qn /norestart。
+    const extras = [...raw.matchAll(/\b([A-Z_][A-Z0-9_]*=[^\s"]+)/gi)].map((m) => m[1]!).filter((v) => v !== undefined);
+    return { program: "msiexec.exe", args: ["/x", product, ...extras, "/qn", "/norestart"], requiresAdmin: true };
   }
   const args = segments.slice(1);
   if (quiet && !args.some((a) => /^\/[sq]$/i.test(a))) args.push("/S");
@@ -257,16 +269,25 @@ function spawnCaptured(
 }
 
 /**
+ * 按 Windows 命令行规则给参数加引号。
+ * `Diagnostics.ProcessStartInfo(file, arguments)` 收的是**一整串**，
+ * 直接把 JSON 数组交给它会被 PowerShell 拼成 `a b c` 这种裸串，含空格的参数当场被拆开。
+ */
+export function quoteWindowsArgs(args: readonly string[]): string {
+  return args.map((arg) => (/[\s"]/.test(arg) ? '"' + arg.replace(/"/g, '\\"') + '"' : arg)).join(" ");
+}
+
+/**
  * 提权执行：把请求编码为 base64 后交给 PowerShell 组装 ProcessStartInfo，
  * 参数不经过 shell 解析，避免命令注入。
  */
 export async function elevateViaPowerShell(request: ExecutionRequest): Promise<ExecutionResult> {
   const started = Date.now();
-  const payload = { program: request.program, args: request.args, cwd: request.cwd ?? process.cwd() };
+  const payload = { program: request.program, arguments: quoteWindowsArgs(request.args), cwd: request.cwd ?? process.cwd() };
   const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
   const script =
     "$j=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encoded + "'));$p=$j|ConvertFrom-Json;" +
-    "$psi=New-Object Diagnostics.ProcessStartInfo($p.program,$p.args);" +
+    "$psi=New-Object Diagnostics.ProcessStartInfo($p.program,$p.arguments);" +
     "$psi.WorkingDirectory=$p.cwd;$psi.UseShellExecute=$false;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true;" +
     "$proc=[Diagnostics.Process]::Start($psi);$out=$proc.StandardOutput.ReadToEnd();$err=$proc.StandardError.ReadToEnd();$proc.WaitForExit();" +
     "Write-Output ('EXIT={0} OUT={1} ERR={2}' -f $proc.ExitCode,$out,$err)";

@@ -83,4 +83,5 @@ APPCENTER_API=http://127.0.0.1:7991 node --experimental-transform-types packages
 
 - 清单只追加目录里存在的条目；应用下架后，旧的落盘文件不会被删除（保留镜像语义），`status` 会把它们原样列出。
 - `size` 档位默认（大文件友好）；要防篡改用 `verify:"sha256"`，代价是逐字节读一遍缓存文件。
-- 尚未做：按 manifest 的离线安装（`app.install` 直接吃本地包）、仓库目录的锁与多客户端并发写。
+- 已实现：按 manifest 的离线安装——`InstallOrchestrator` 在下载前先经 `LocalRepo.resolve(appId, version, downloadUrl)` 查本地镜像，命中即走 `localFileDownloader` 复制已校验的包并跳过网络下载，未命中回退网络。`app.install` 可直接吃本地包，离线可用（`npm run build:real-catalog` 镜像完即可断网安装）。
+- 尚未做：仓库目录的锁与多客户端并发写。

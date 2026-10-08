@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { restoreBackup, restoreBackupSetWith, verifyBackupIntegrity, type BackupRecord, type BackupSet } from "@appcenter/core";
+import { makeTrackedTmp } from "./util/tmp-dirs.ts";
 
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 
@@ -14,7 +15,7 @@ const sha = (text: string): string => createHash("sha256").update(text).digest("
  * （`not a registry file`），即便被拿去 import 也只会非零退出，不会改动本机注册表。
  */
 async function sandbox(content = "not a registry file"): Promise<{ file: string; record: BackupRecord }> {
-  const dir = await mkdtemp(path.join(tmpdir(), "backup-restore-"));
+  const dir = await makeTrackedTmp("backup-restore-");
   const file = path.join(dir, "key.reg");
   await writeFile(file, content, "utf8");
   return { file, record: { keyPath: "HKLM\\SOFTWARE\\DemoApp", file, sha256: sha(content), ok: true, message: "exported" } };

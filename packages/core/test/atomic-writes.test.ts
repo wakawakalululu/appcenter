@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { RuntimeConfigStore, trayStatusFor, type InstallJob, type JobState } from "@appcenter/core";
+import { makeTrackedTmp } from "./util/tmp-dirs.ts";
 
 function job(state: JobState, at: string, tail: JobState[] = []): InstallJob {
   const states = [state, ...tail];
@@ -19,7 +20,7 @@ function job(state: JobState, at: string, tail: JobState[] = []): InstallJob {
 }
 
 test("并发保存运行配置不会互相踩临时文件，也不留脏 .tmp", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "atomic-"));
+  const dir = await makeTrackedTmp("atomic-");
   const file = path.join(dir, "runtime.json");
   const store = new RuntimeConfigStore(file);
   const results = await Promise.all(
@@ -35,7 +36,7 @@ test("并发保存运行配置不会互相踩临时文件，也不留脏 .tmp", 
 });
 
 test("保存失败时不留 .tmp 残渣", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "atomic-fail-"));
+  const dir = await makeTrackedTmp("atomic-fail-");
   const store = new RuntimeConfigStore(path.join(dir, "nested", "deep", "runtime.json"));
   // 把目标目录做成一个文件，mkdir 会失败：写临时文件那一步之前就应当抛出。
   const { writeFile: wf } = await import("node:fs/promises");

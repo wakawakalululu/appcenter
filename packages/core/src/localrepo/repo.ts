@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, verify as verifySignature } from "node:crypto";
 import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,6 +71,8 @@ export interface LocalRepoOptions {
   concurrency?: number;
   /** 目录里的 downloadUrl 常是相对路径（/dl/...），这里补全成绝对 URL。 */
   urlBase?: string;
+  /** 给了就由 sync() 先拉远端清单，apps/categories 取自 manifest.catalog。 */
+  manifest?: RepoManifestSource;
 }
 
 export interface RepoSyncInput {
@@ -80,8 +82,19 @@ export interface RepoSyncInput {
   allVersions?: boolean;
 }
 
+/**
+ * sync 的输入源：本机目录快照，或一份远端清单。
+ * 二者同构——manifest.items 就是 RepoManifestItem[]，所以不需要另起一条流水线。
+ */
+export type RepoSyncSource = RepoSyncInput | { manifest: RepoManifest; allVersions?: boolean };
+
 function resolve(root: string | (() => Promise<string> | string)): Promise<string> {
   return typeof root === "string" ? Promise.resolve(root) : Promise.resolve(root()).then((value) => value);
+}
+
+/** 由 appId/version/downloadUrl 重建仓库内相对落盘路径；sync 镜像与离线 resolve 取包共用，避免两处漂移。 */
+export function relativePathOf(appId: string, version: string, downloadUrl: string): string {
+  return [safePathSegment(appId), safePathSegment(version, "0") + extensionOf(downloadUrl)].join("/");
 }
 
 /**
@@ -117,21 +130,157 @@ export function createLocalFileDownloader(allowedRoots: readonly string[] = []):
         throw new Error("local package size mismatch: " + String(stat.size) + " != " + String(expectedSize));
       }
       await fs.mkdir(path.dirname(request.target), { recursive: true });
-      // 先复制到临时名再改名，避免半个文件被当成已镜像成功。
-      const staging = request.target + ".copying";
-      await fs.copyFile(source, staging);
-      const sha256 = await hashFile(staging);
-      if (sha256 !== expectedSha256.toLowerCase()) {
-        await fs.rm(staging, { force: true });
-        throw new Error("local package checksum mismatch");
+      // staging 名必须唯一：写死 `<target>.copying` 时，两个宿主并发镜像同一个包会踩同一个文件
+      // （一方按自己的校验值删掉另一方正在写的东西，另一方 rename 拿到 ENOENT），
+      // 而且一次崩溃留下的残骸会把之后每一轮镜像都打死——实测 copyfile 报 EPERM，
+      // 看起来却像源包坏了。校验也只对自己那份独占的 staging 做，校验值才等于将要落盘的字节。
+      const staging = request.target + "." + process.pid + "." + randomBytes(4).toString("hex") + ".copying";
+      try {
+        await fs.copyFile(source, staging);
+        const sha256 = await hashFile(staging);
+        if (sha256 !== expectedSha256.toLowerCase()) throw new Error("local package checksum mismatch");
+        // Windows 上 rename 覆盖被别的过程持有的目标不是原子替换而是 EPERM，要有界重试。
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          try {
+            await fs.rename(staging, request.target);
+            lastError = undefined;
+            break;
+          } catch (err) {
+            lastError = err;
+            await new Promise<void>((resolve) => setTimeout(resolve, 20));
+          }
+        }
+        if (lastError) throw lastError;
+        return { id: request.id, target: request.target, bytes: stat.size, sha256, fromCache: false };
+      } catch (err) {
+        await fs.rm(staging, { force: true, maxRetries: 3, retryDelay: 20 }).catch(() => undefined);
+        throw err;
       }
-      await fs.rename(staging, request.target);
-      return { id: request.id, target: request.target, bytes: stat.size, sha256, fromCache: false };
     },
   };
 }
 
 export const localFileDownloader: DownloadPort = createLocalFileDownloader();
+
+/** http(s) 分支的 URL 前缀白名单语义与 file 分支相反：空 = 拒绝一切 http(s)。 */
+export interface RepoDownloaderOptions {
+  /** file:// 分支的来源根白名单（沿用现有语义：空 = 不限制）。 */
+  allowedFileRoots?: readonly string[];
+  allowedUrlPrefixes?: readonly string[];
+  /** 网络分支；不传时 http(s) 一律拒绝。 */
+  http?: DownloadPort;
+}
+
+/**
+ * 逐段比对 URL 前缀。不能用 startsWith：`https://good.com.evil.net/x` 是以
+ * `https://good.com` 开头的，那样白名单形同虚设。
+ */
+export function urlWithinPrefix(url: string, prefixes: readonly string[]): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+  return prefixes.some((raw) => {
+    let base: URL;
+    try {
+      base = new URL(raw);
+    } catch {
+      return false;
+    }
+    if (base.protocol !== parsed.protocol || base.host !== parsed.host) return false;
+    const root = base.pathname.endsWith("/") ? base.pathname : base.pathname + "/";
+    return parsed.pathname === base.pathname || parsed.pathname.startsWith(root);
+  });
+}
+
+/**
+ * 仓库下载端口：file:// 走本机复制（size+sha256 与来源根校验都在里面），http(s) 走网络分支。
+ * 放行条件刻意收紧：
+ * 1. 前缀白名单为空时 http(s) 一律拒绝——否则"放开网络"等于默认放行任意外网 URL；
+ * 2. 必须同时给 expected size and sha256——远端清单不可信，缺一即拒。
+ */
+export function createRepoDownloader(options: RepoDownloaderOptions = {}): DownloadPort {
+  const file = createLocalFileDownloader(options.allowedFileRoots ?? []);
+  const prefixes = options.allowedUrlPrefixes ?? [];
+  return {
+    async download(request) {
+      if (request.url.startsWith("file://")) return file.download(request);
+      if (!/^https?:\/\//i.test(request.url)) {
+        throw new Error("repo package source must be file:// or http(s)://: " + request.url);
+      }
+      if (!urlWithinPrefix(request.url, prefixes)) {
+        throw new Error("repo package url outside the allowed prefixes: " + request.url);
+      }
+      if (!options.http) throw new Error("no http downloader configured for " + request.url);
+      if (!request.expectedSize || !request.expectedSha256) {
+        throw new Error("remote package requires expected size and sha256");
+      }
+      return options.http.download(request);
+    },
+  };
+}
+
+/** 远端清单来源。给了 sha256 就必校验字节，给了 publicKey 就必验签名。 */
+export interface RepoManifestSource {
+  url: string;
+  sha256?: string;
+  publicKey?: string;
+  allowedUrlPrefixes?: readonly string[];
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+const MANIFEST_MAX_BYTES = 32 * 1024 * 1024;
+
+/** 拉远端清单并做前缀/大小/校验和/结构校验；任一环节不过都 throw，由调用方决定降级。 */
+export async function fetchRepoManifest(source: RepoManifestSource): Promise<RepoManifest> {
+  const prefixes = source.allowedUrlPrefixes ?? [];
+  if (!urlWithinPrefix(source.url, prefixes)) {
+    throw new Error("repo manifest url outside the allowed prefixes: " + source.url);
+  }
+  const fetchImpl = source.fetchImpl ?? fetch;
+  const response = await fetchImpl(source.url, { signal: AbortSignal.timeout(source.timeoutMs ?? 15000) });
+  if (!response.ok) throw new Error("repo manifest fetch failed: HTTP " + String(response.status));
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.byteLength > MANIFEST_MAX_BYTES) throw new Error("repo manifest too large: " + String(bytes.byteLength));
+  if (source.sha256) {
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== source.sha256.toLowerCase()) throw new Error("repo manifest checksum mismatch");
+  }
+  const parsed = JSON.parse(bytes.toString("utf8")) as RepoManifest & { signature?: string };
+  if (parsed.formatVersion !== 1) throw new Error("unsupported repo manifest formatVersion: " + String(parsed.formatVersion));
+  if (source.publicKey) {
+    if (!parsed.signature) throw new Error("repo manifest missing signature");
+    const ok = verifySignature(null, bytes, source.publicKey, Buffer.from(parsed.signature, "base64"));
+    if (!ok) throw new Error("repo manifest signature mismatch");
+  }
+  for (const item of parsed.items ?? []) {
+    if (!urlWithinPrefix(item.url, prefixes)) {
+      throw new Error("repo manifest item url outside the allowed prefixes: " + String(item.url));
+    }
+    // 清单里的 relativePath 是不可信输入，越界由 sync 的 joinWithinRoot 兜底，这里先挡一道。
+    if (item.relativePath.includes("..")) throw new Error("repo manifest item path escapes: " + item.relativePath);
+    if (!(item.sizeBytes > 0)) throw new Error("repo manifest item missing sizeBytes: " + item.appId);
+    if (!/^[0-9a-f]{64}$/i.test(item.sha256 ?? "")) throw new Error("repo manifest item missing sha256: " + item.appId);
+  }
+  return parsed;
+}
+
+/** 从环境变量读远端清单配置；CATALOG_MANIFEST_URL 没给就不启用在线拉取。 */
+export function repoManifestSourceFromEnv(env: NodeJS.ProcessEnv = process.env): RepoManifestSource | undefined {
+  const url = env.CATALOG_MANIFEST_URL?.trim();
+  if (!url) return undefined;
+  return {
+    url,
+    sha256: env.REPO_MANIFEST_SHA256?.trim() || undefined,
+    publicKey: env.REPO_MANIFEST_PUBLIC_KEY?.trim() || undefined,
+    allowedUrlPrefixes: (env.REPO_ALLOWED_URL_PREFIXES ?? "").split(",").map((entry) => entry.trim()).filter(Boolean),
+  };
+}
 
 async function hashFile(file: string): Promise<string> {
   return new Promise((resolveHash, reject) => {
@@ -172,7 +321,7 @@ export class LocalRepo {
           fileName,
           // appId 与 version 都是目录侧给的字符串：`safeName` 不拦点号也不拦正斜杠，
           // 单靠它拼得出 `../../evil`。落盘分量一律过 safePathSegment。
-          relativePath: [safePathSegment(app.id), safePathSegment(version.version, "0") + extensionOf(version.downloadUrl)].join("/"),
+          relativePath: relativePathOf(app.id, version.version, version.downloadUrl),
           sizeBytes: version.sizeBytes,
           sha256: version.sha256,
           url,
@@ -184,14 +333,25 @@ export class LocalRepo {
     return items;
   }
 
-  async sync(input: RepoSyncInput): Promise<RepoSyncReport> {
+  async sync(input: RepoSyncSource): Promise<RepoSyncReport> {
     const started = Date.now();
     const root = await resolve(this.deps.root);
     await fs.mkdir(root, { recursive: true });
     const manifestFile = path.join(root, "manifest.json");
     const previous = await this.readManifest(root);
 
-    const items = this.desiredItems(input);
+    let items: RepoManifestItem[];
+    let catalogApps: AppSummary[];
+    let catalogCategories: Category[];
+    if ("manifest" in input) {
+      items = input.manifest.items.map((item) => ({ ...item, status: "pending" as const }));
+      catalogApps = input.manifest.catalog.apps;
+      catalogCategories = input.manifest.catalog.categories;
+    } else {
+      items = this.desiredItems(input);
+      catalogApps = input.apps.map(({ versions: _versions, ...summary }) => summary);
+      catalogCategories = [...input.categories];
+    }
     const verify = this.deps.verify ?? "size";
     const report: RepoSyncReport = { root, manifestFile, saved: [], cached: [], failed: [], totalBytes: 0, durationMs: 0 };
 
@@ -233,7 +393,7 @@ export class LocalRepo {
       formatVersion: 1,
       generatedAt: new Date().toISOString(),
       root,
-      catalog: { apps: input.apps.map(({ versions: _versions, ...summary }) => summary), categories: [...input.categories] },
+      catalog: { apps: catalogApps, categories: catalogCategories },
       items,
     };
     await writeAtomic(manifestFile, JSON.stringify(manifest, null, 2));
@@ -248,6 +408,33 @@ export class LocalRepo {
     } catch {
       return new Map();
     }
+  }
+
+  /**
+   * 离线安装取包：本地仓库已镜像该 (appId, version) 且磁盘文件大小/校验通过时，
+   * 返回其绝对路径与目录记录的 sha256/size，供安装编排器直接复用、跳过网络下载。
+   * 未镜像、文件缺失或被篡改则返回 null，调用方回退到网络下载。
+   */
+  async resolve(
+    appId: string,
+    version: string,
+    downloadUrl: string,
+    verify: "size" | "sha256" = this.deps.verify ?? "size",
+  ): Promise<{ file: string; sha256: string; size: number } | null> {
+    const root = await resolve(this.deps.root);
+    const manifest = await this.readManifest(root);
+    const rel = relativePathOf(appId, version, downloadUrl);
+    const item = manifest.get(rel);
+    if (!item) return null;
+    const file = joinWithinRoot(root, rel);
+    const stat = await fs.stat(file).catch(() => null);
+    if (!stat || !stat.isFile()) return null;
+    if (stat.size !== item.sizeBytes) return null;
+    if (verify === "sha256") {
+      const actual = await hashFile(file);
+      if (actual !== item.sha256.toLowerCase()) return null;
+    }
+    return { file, sha256: item.sha256, size: item.sizeBytes };
   }
 
   /** 只读盘点：按当前磁盘事实（文件存在 + 大小/校验）重算每个条目的状态。 */
@@ -293,7 +480,27 @@ export class LocalRepo {
 }
 
 async function writeAtomic(file: string, body: string): Promise<void> {
-  const tmp = file + ".tmp";
-  await fs.writeFile(tmp, body, "utf8");
-  await fs.rename(tmp, file);
+  // 临时名必须唯一：仓库根是 CLI 与界面宿主共用的，固定 `<file>.tmp` 有两个必死后果——
+  // 两个写者踩同一个文件（先 rename 的一方把另一方还没写完的内容搬成正式清单，后一方 ENOENT），
+  // 以及任何一次崩溃留下的残留 `.tmp` 会从此顶死后续每一次写入（实测撞在同名目录上是 EISDIR）。
+  // Windows 上 rename 覆盖被别的进程持有的目标还会 EPERM，所以同样要有界重试；
+  // 失败时把自己那份临时件清掉，否则它就是下一轮的残留。#27 在缓存与运行配置上踩过同一脚。
+  const tmp = file + "." + process.pid + "." + randomBytes(4).toString("hex") + ".tmp";
+  try {
+    await fs.writeFile(tmp, body, "utf8");
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        await fs.rename(tmp, file);
+        return;
+      } catch (err) {
+        lastError = err;
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    throw lastError;
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
 }

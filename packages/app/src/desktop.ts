@@ -1,9 +1,10 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { installProcessGuardrails } from "@appcenter/core";
 import { startUi } from "./bridge.ts";
 
 /**
@@ -93,6 +94,8 @@ export interface DesktopOptions {
 
 export interface DesktopSession {
   uiUrl: string;
+  /** 这次真正在用的目录服务端口（父进程分配的临时号码），调用方与测试要靠它证明没复用到别人的服务。 */
+  catalogPort: number;
   shell: ChildProcess | null;
   catalogServer: ChildProcess;
   /** 本次为浏览器建的隔离 profile 目录；close() 负责回收，别把它们留在 %TEMP%。 */
@@ -129,9 +132,42 @@ function exists(file: string): Promise<boolean> {
   return access(file).then(() => true).catch(() => false);
 }
 
+/**
+ * 向系统要一个当前空闲的临时端口，然后立刻放开，把这个号码交给子进程去绑。
+ * 为什么不直接用 0 让子进程自己挑：那要求父进程读懂子进程打印的端口，而「日志措辞当协议用」
+ * 是本文件里已经被一条用例明确否掉的判据（见 desktop-lifecycle.test.ts 的静默服务）。
+ * 中间的窄竞态是有归宿的：号码被别人抢走时子进程 bind 失败会退出，watchDeath 会把这次失败兜出来，
+ * 不会退回「端口能连上就算就绪」。
+ */
+async function allocatePort(): Promise<number> {
+  const srv = net.createServer();
+  const port = await new Promise<number>((resolve) => srv.listen(0, "127.0.0.1", () => resolve((srv.address() as net.AddressInfo).port)));
+  await new Promise<void>((resolve) => srv.close(() => resolve()));
+  return port;
+}
+
+/**
+ * 端口持有者的 PID；拿不到（平台不支持/查询失败）返回 null，调用方据此跳过身份核对而不是当成通过。
+ * 「端口能连上」不含身份信息：开发机上常驻的另一个实例（包括正在扫真机注册表那台）完全可能占着同一个号码，
+ * 于是这份就绪判据会指到别人的服务上去——本仓库已在 smoke、demo 截图两处踩过，判据统一到「是我起的进程」。
+ */
+export async function listenerOwnerPid(port: number): Promise<number | null> {
+  if (process.platform !== "win32") return null;
+  const r = spawnSync("powershell.exe", [
+    "-NoProfile", "-NonInteractive", "-Command",
+    "(Get-NetTCPConnection -LocalPort " + String(port) + " -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess",
+  ], { encoding: "utf8", timeout: 8000 });
+  const digits = (r.stdout ?? "").replace(/\D/g, "");
+  if (r.status !== 0 || digits === "") return null;
+  return Number(digits);
+}
+
 /** 起目录服务 + 引擎 + 桥，再开独立桌面窗口；窗口关闭即整场退出（托盘常驻走 tray.ts）。 */
 export async function runDesktop(options: DesktopOptions = {}): Promise<DesktopSession> {
-  const catalogPort = options.catalogPort ?? Number(process.env.CATALOG_PORT ?? 7991);
+  // 不再默认那个 everyone 都会去占的固定号码（7991）：占着它的不一定是这次起的服务。
+  // 显式传了 catalogPort 仍然尊重（测试与部署会用），没传就向系统要一个临时端口。
+  const requested = options.catalogPort ?? Number(process.env.CATALOG_PORT ?? 0);
+  const catalogPort = requested > 0 ? requested : await allocatePort();
   const here = path.dirname(fileURLToPath(import.meta.url));
   const serverEntry = options.serverEntry ?? path.join(here, "..", "..", "server", "src", "main.ts");
   const profileDirs: string[] = [];
@@ -189,6 +225,11 @@ export async function runDesktop(options: DesktopOptions = {}): Promise<DesktopS
     });
     const outcome = await Promise.race([waitForPort(catalogPort).then((ready) => (ready ? "ready" : "timeout")), watchDeath]);
     if (outcome !== "ready") throw earlyFailure ?? new Error("catalog server did not listen on " + String(catalogPort) + " within 15s");
+    // 就绪之后还要问「监听这个端口的是不是我起的那个进程」。查不到持有者就跳过并说明——
+    // 跳过是可见的，不能把「查不到」当成「核对通过」。
+    const owner = await listenerOwnerPid(catalogPort);
+    if (owner === null) console.log("identity check (port owner) unavailable on " + process.platform + " — relying on the parent-allocated ephemeral port");
+    else if (owner !== catalogServer.pid) throw new Error("端口 " + String(catalogPort) + " 由 PID " + String(owner) + " 持有，不是本次起的目录服务（PID " + String(catalogServer.pid ?? "?") + "）——拒绝把别人的服务当成就绪");
 
     ui = await startUi({
       serverUrl: "http://127.0.0.1:" + String(catalogPort),
@@ -207,7 +248,7 @@ export async function runDesktop(options: DesktopOptions = {}): Promise<DesktopS
     const shellPath = options.shellPath ?? (await findShellExecutable(shellCandidates())) ?? "";
     if (!shellPath) {
       console.log("no Edge/Chrome found — open " + target + " manually");
-      return { uiUrl: target, shell: null, catalogServer, profileDirs, close: teardown };
+      return { uiUrl: target, catalogPort, shell: null, catalogServer, profileDirs, close: teardown };
     }
     const shell = spawn(shellPath, buildShellArgs(target, geometry, profileDir), { detached: false, stdio: "ignore" });
     // 浏览器启动失败同样只发 'error' 事件；不挂监听就是猝死宿主。
@@ -215,7 +256,7 @@ export async function runDesktop(options: DesktopOptions = {}): Promise<DesktopS
       console.log("desktop window failed: " + err.message + " — open " + target + " manually");
     });
     console.log("desktop window: " + shellPath + " " + JSON.stringify(geometry));
-    return { uiUrl: target, shell, catalogServer, profileDirs, close: teardown };
+    return { uiUrl: target, catalogPort, shell, catalogServer, profileDirs, close: teardown };
   } catch (err) {
     // 到这一步之前起的任何东西都得收掉，否则就是一次失败换一个占着端口的孤儿进程。
     await teardown();
@@ -223,19 +264,30 @@ export async function runDesktop(options: DesktopOptions = {}): Promise<DesktopS
   }
 }
 
-/** 常见安装位置的探测顺序；CHROME_PATH/SHELL_PATH 可覆盖。 */
-export function shellCandidates(): (string | undefined)[] {
+/**
+ * 常见安装位置的探测顺序；CHROME_PATH/SHELL_PATH 可覆盖。
+ * 位置要从环境变量推，不能写死 C: —— 云电脑/换系统盘的机器上程序目录不在 C:，
+ * 写死的结果是「找不到浏览器」，界面直接退回「请自己打开 URL」。
+ */
+export function shellCandidates(env: NodeJS.ProcessEnv = process.env): (string | undefined)[] {
+  const pf = env.ProgramFiles ?? "C:\\Program Files";
+  const pf86 = env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
+  const local = env.LOCALAPPDATA;
   return [
-    process.env.SHELL_PATH,
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    env.SHELL_PATH,
+    pf + "\\Google\\Chrome\\Application\\chrome.exe",
+    pf86 + "\\Google\\Chrome\\Application\\chrome.exe",
+    // 用户级安装的 Chrome 不进 Program Files。
+    local ? local + "\\Google\\Chrome\\Application\\chrome.exe" : undefined,
+    pf86 + "\\Microsoft\\Edge\\Application\\msedge.exe",
+    pf + "\\Microsoft\\Edge\\Application\\msedge.exe",
   ];
 }
 
 const invokedDirectly = process.argv[1] !== undefined && process.argv[1].replace(/\\/g, "/").endsWith("desktop.ts");
 if (invokedDirectly) {
+  // 桌面宿主是长驻进程：装护栏只为了「死因要留痕」，不改变崩溃语义。
+  installProcessGuardrails({ log: (_level, message) => console.error("[guard] " + message) });
   const session = await runDesktop().catch((err: unknown) => {
     console.error("desktop failed: " + (err instanceof Error ? err.message : String(err)));
     process.exit(1);
